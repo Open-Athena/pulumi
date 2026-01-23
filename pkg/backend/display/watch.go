@@ -97,8 +97,9 @@ func ShowWatchEvents(op string, permalink string, events <-chan engine.Event, do
 					false, /* debug */
 					false, /* refresh */
 					false, /* showSames */
-					false, /* showSecrest*/
-					false, /* truncateOutput*/
+					false, /* showSecrets */
+					false, /* truncateOutput */
+					opts.PatchFormat,
 				)
 				if props != "" {
 					WatchPrefixPrintf(time.Now(), opts.Color, "",

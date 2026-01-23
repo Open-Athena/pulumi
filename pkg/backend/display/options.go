@@ -61,6 +61,7 @@ type Options struct {
 	ShowSecrets              bool                // true to display secrets in the output.
 	ShowURNs                 bool                // true to display full URNs instead of short resource names.
 	SuppressDiagEventsInDiff bool                // true to suppress displaying diagnostic events in the diff display
+	PatchFormat              bool                // true to emit unified diff format for property changes (- for removed, + for added)
 
 	SuppressStackRow bool // true to hide the synthetic stack row when no stack is involved.
 

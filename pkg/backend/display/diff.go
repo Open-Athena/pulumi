@@ -213,7 +213,7 @@ func renderDiffPolicyRemediationEvent(payload engine.PolicyRemediationEventPaylo
 	if detailed {
 		var b bytes.Buffer
 		PrintObjectDiff(&b, *resource.ToResourceObjectDiff(diff), nil,
-			false /*planning*/, 2, true /*summary*/, true /*truncateOutput*/, false /*debug*/, opts.ShowSecrets, nil)
+			false /*planning*/, 2, true /*summary*/, true /*truncateOutput*/, false /*debug*/, opts.ShowSecrets, nil, opts.PatchFormat)
 		remediationLine = fmt.Sprintf("%s\n%s", remediationLine, b.String())
 	} else {
 		var b bytes.Buffer
@@ -437,7 +437,7 @@ func renderDiff(
 	opts Options,
 ) {
 	indent := getIndent(metadata, seen, opts)
-	summary := getResourcePropertiesSummary(metadata, indent, opts.ShowURNs)
+	summary := getResourcePropertiesSummaryEx(metadata, indent, opts.ShowURNs, opts.PatchFormat)
 
 	var details string
 	// An OpSame might have a diff due to metadata changes (e.g. protect) but we should never print a property diff,
@@ -447,16 +447,16 @@ func renderDiff(
 			var buf bytes.Buffer
 			if diff, hidden := engine.TranslateDetailedDiff(&metadata, refresh); diff != nil {
 				PrintObjectDiff(&buf, *diff, nil /*include*/, planning, indent+1,
-					opts.SummaryDiff, opts.TruncateOutput, debug, opts.ShowSecrets, hidden)
+					opts.SummaryDiff, opts.TruncateOutput, debug, opts.ShowSecrets, hidden, opts.PatchFormat)
 			} else {
 				PrintObject(
 					&buf, metadata.Old.Inputs, planning, indent+1, deploy.OpSame, true, /*prefix*/
-					opts.TruncateOutput, debug, opts.ShowSecrets)
+					opts.TruncateOutput, debug, opts.ShowSecrets, opts.PatchFormat)
 			}
 			details = buf.String()
 		} else {
 			details = getResourcePropertiesDetails(
-				metadata, indent, planning, opts.SummaryDiff, opts.TruncateOutput, debug, opts.ShowSecrets)
+				metadata, indent, planning, opts.SummaryDiff, opts.TruncateOutput, debug, opts.ShowSecrets, opts.PatchFormat)
 		}
 	}
 	fprintIgnoreError(out, opts.Color.Colorize(summary))
@@ -537,10 +537,11 @@ func renderDiffResourceOutputsEvent(
 			opts.ShowSameResources,
 			opts.ShowSecrets,
 			opts.TruncateOutput,
+			opts.PatchFormat,
 		)
 		if refresh && (payload.Metadata.Op != deploy.OpRefresh || text != "" || isRootStack(payload.Metadata)) {
 			// We would not have rendered the summary yet in this case, so do it now.
-			summary := getResourcePropertiesSummary(payload.Metadata, indent, opts.ShowURNs)
+			summary := getResourcePropertiesSummaryEx(payload.Metadata, indent, opts.ShowURNs, opts.PatchFormat)
 			fprintIgnoreError(out, opts.Color.Colorize(summary))
 		}
 
