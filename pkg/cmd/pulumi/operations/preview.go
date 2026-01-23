@@ -265,6 +265,7 @@ func NewPreviewCmd() *cobra.Command {
 
 	// Flags for engine.UpdateOptions.
 	var jsonDisplay bool
+	var patchFormat bool
 	var policyPackPaths []string
 	var policyPackConfigPaths []string
 	var diffDisplay bool
@@ -331,7 +332,8 @@ func NewPreviewCmd() *cobra.Command {
 
 			ssml := cmdStack.NewStackSecretsManagerLoaderFromEnv()
 			displayType := display.DisplayProgress
-			if diffDisplay {
+			// Patch format implies diff display mode
+			if diffDisplay || patchFormat {
 				displayType = display.DisplayDiff
 			}
 
@@ -351,6 +353,7 @@ func NewPreviewCmd() *cobra.Command {
 				JSONDisplay:            jsonDisplay,
 				EventLogPath:           eventLogPath,
 				Debug:                  debug,
+				PatchFormat:            patchFormat,
 			}
 
 			// we only suppress permalinks if the user passes true. the default is an empty string
@@ -649,6 +652,9 @@ func NewPreviewCmd() *cobra.Command {
 	cmd.PersistentFlags().BoolVar(
 		&diffDisplay, "diff", false,
 		"Display operation as a rich diff showing the overall change")
+	cmd.PersistentFlags().BoolVar(
+		&patchFormat, "patch", false,
+		"Display property diffs in unified patch format (- for removed, + for added)")
 	cmd.Flags().BoolVarP(
 		&jsonDisplay, "json", "j", false,
 		"Serialize the preview diffs, operations, and overall output as JSON."+
@@ -727,6 +733,9 @@ func NewPreviewCmd() *cobra.Command {
 	cmd.PersistentFlags().StringVar(&execAgent, "exec-agent", "", "")
 	// ignore err, only happens if flag does not exist
 	_ = cmd.PersistentFlags().MarkHidden("exec-agent")
+
+	// JSON and patch formats are mutually exclusive.
+	cmd.MarkFlagsMutuallyExclusive("json", "patch")
 
 	return cmd
 }

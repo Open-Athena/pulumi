@@ -1022,7 +1022,8 @@ func (display *ProgressDisplay) printOutputs() {
 		false, /* refresh */
 		display.opts.ShowSameResources,
 		display.opts.ShowSecrets,
-		display.opts.TruncateOutput)
+		display.opts.TruncateOutput,
+		display.opts.PatchFormat)
 	if props != "" {
 		display.println(colors.SpecHeadline + "Outputs:" + colors.Reset)
 		display.println(props)

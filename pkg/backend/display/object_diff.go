@@ -62,6 +62,10 @@ func getIndent(step engine.StepEventMetadata, seen map[resource.URN]engine.StepE
 }
 
 func printStepHeader(b io.StringWriter, step engine.StepEventMetadata) {
+	printStepHeaderEx(b, step, false)
+}
+
+func printStepHeaderEx(b io.StringWriter, step engine.StepEventMetadata, patchFormat bool) {
 	var extra string
 	old := step.Old
 	new := step.New
@@ -72,12 +76,43 @@ func printStepHeader(b io.StringWriter, step engine.StepEventMetadata) {
 		// show a locked symbol, since we are either newly protecting this resource, or retaining protection.
 		extra = " 🔒"
 	}
-	writeString(b, fmt.Sprintf("%s: (%s)%s\n", string(step.Type), step.Op, extra))
+	if patchFormat {
+		// In patch format, the +/-/space prefix conveys the operation, so omit the (op) suffix
+		writeString(b, fmt.Sprintf("%s%s\n", string(step.Type), extra))
+	} else {
+		writeString(b, fmt.Sprintf("%s: (%s)%s\n", string(step.Type), step.Op, extra))
+	}
 }
 
 func getIndentationString(indent int, op display.StepOp, prefix bool) string {
+	return getIndentationStringEx(indent, op, prefix, false)
+}
+
+func getIndentationStringEx(indent int, op display.StepOp, prefix bool, patchFormat bool) string {
 	result := strings.Repeat("    ", indent)
 
+	if patchFormat {
+		// In patch format, marker at column 0 based on operation
+		// Unified diff semantics: resource headers for updates are context lines (space),
+		// only the changed properties within use +/- markers
+		var marker string
+		switch op {
+		case deploy.OpCreate, deploy.OpImport, deploy.OpCreateReplacement:
+			marker = "+"
+		case deploy.OpDelete, deploy.OpDeleteReplaced:
+			marker = "-"
+		default:
+			// Updates, refreshes, replaces, and same all use space (context line)
+			marker = " "
+		}
+		// Return marker + remaining indentation (preserve visual width)
+		if len(result) > 0 {
+			return marker + result[:len(result)-1]
+		}
+		return marker
+	}
+
+	// Non-patch format: original behavior
 	if !prefix {
 		return result
 	}
@@ -90,6 +125,7 @@ func getIndentationString(indent int, op display.StepOp, prefix bool) string {
 	rp := deploy.RawPrefix(op)
 	contract.Assertf(len(rp) == 2, "expected raw prefix to be 2 characters long: %q", rp)
 	contract.Assertf(len(result) >= 2, "expected indention to be at least 2 characters long: %q", result)
+
 	return result[:len(result)-2] + rp
 }
 
@@ -99,14 +135,22 @@ func writeString(b io.StringWriter, s string) {
 }
 
 func writeIndentedf(b io.StringWriter, indent int, op display.StepOp, prefix bool, format string, a ...any) {
+	writeIndentedfEx(b, indent, op, prefix, false, format, a...)
+}
+
+func writeIndentedfEx(b io.StringWriter, indent int, op display.StepOp, prefix bool, patchFormat bool, format string, a ...any) {
 	writeString(b, deploy.Color(op))
-	writeString(b, getIndentationString(indent, op, prefix))
+	writeString(b, getIndentationStringEx(indent, op, prefix, patchFormat))
 	writeString(b, fmt.Sprintf(format, a...))
 	writeString(b, colors.Reset)
 }
 
 func writeUnprefixedIndentedf(b io.StringWriter, indent int, op display.StepOp, format string, a ...any) {
 	writeIndentedf(b, indent, op, false, format, a...)
+}
+
+func writeUnprefixedIndentedfEx(b io.StringWriter, indent int, op display.StepOp, patchFormat bool, format string, a ...any) {
+	writeIndentedfEx(b, indent, op, false, patchFormat, format, a...)
 }
 
 func writef(b io.StringWriter, op display.StepOp, format string, a ...any) {
@@ -118,23 +162,48 @@ func writeVerbatim(b io.StringWriter, op display.StepOp, value string) {
 }
 
 func getResourcePropertiesSummary(step engine.StepEventMetadata, indent int) string {
+	return getResourcePropertiesSummaryEx(step, indent, false)
+}
+
+func getResourcePropertiesSummaryEx(step engine.StepEventMetadata, indent int, patchFormat bool) string {
 	var b bytes.Buffer
 
 	op := step.Op
 	urn := step.URN
 	old := step.Old
 
-	// Print the indentation.
-	writeString(&b, getIndentationString(indent, op, false))
-
-	// First, print out the operation's prefix.
-	writeString(&b, deploy.Prefix(op, true /*done*/))
+	if patchFormat {
+		// In patch format: marker at column 0, then indentation
+		// For updates, use default color (context line); for create/delete, use op color
+		colorOp := op
+		switch op {
+		case deploy.OpUpdate, deploy.OpRefresh, deploy.OpReplace, deploy.OpSame:
+			colorOp = deploy.OpSame // Context lines get default color
+		}
+		writeString(&b, deploy.Color(colorOp))
+		writeString(&b, getIndentationStringEx(indent, op, true, true))
+		writeString(&b, " ") // Space before content
+	} else {
+		// Print the indentation.
+		writeString(&b, getIndentationString(indent, op, false))
+		// First, print out the operation's prefix.
+		writeString(&b, deploy.Prefix(op, true /*done*/))
+	}
 
 	// Next, print the resource type (since it is easy on the eyes and can be quickly identified).
-	printStepHeader(&b, step)
+	printStepHeaderEx(&b, step, patchFormat)
 
 	// For these simple properties, print them as 'same' if they're just an update or replace.
+	// In patch format, create/delete blocks need their nested content to have +/- markers,
+	// but for updates, metadata remains as context lines (space prefix, no color).
 	simplePropOp := considerSameIfNotCreateOrDelete(op)
+	metadataOp := simplePropOp
+	if patchFormat {
+		switch op {
+		case deploy.OpCreate, deploy.OpDelete, deploy.OpDeleteReplaced, deploy.OpImport, deploy.OpCreateReplacement:
+			metadataOp = op
+		}
+	}
 
 	// Print out the URN and, if present, the ID, as "pseudo-properties" and indent them.
 	var id resource.ID
@@ -144,10 +213,10 @@ func getResourcePropertiesSummary(step engine.StepEventMetadata, indent int) str
 
 	// Always print the ID, URN, and provider.
 	if id != "" {
-		writeUnprefixedIndentedf(&b, indent+1, simplePropOp, "[id=%s]\n", string(id))
+		writeUnprefixedIndentedfEx(&b, indent+1, metadataOp, patchFormat, "[id=%s]\n", string(id))
 	}
 	if urn != "" {
-		writeUnprefixedIndentedf(&b, indent+1, simplePropOp, "[urn=%s]\n", escapeURN(string(urn)))
+		writeUnprefixedIndentedfEx(&b, indent+1, metadataOp, patchFormat, "[urn=%s]\n", escapeURN(string(urn)))
 	}
 
 	if step.Provider != "" {
@@ -156,22 +225,32 @@ func getResourcePropertiesSummary(step engine.StepEventMetadata, indent int) str
 			newProv, err := providers.ParseReference(new.Provider)
 			contract.Assertf(err == nil, "invalid provider reference %q: %v", new.Provider, err)
 
-			writeUnprefixedIndentedf(&b, indent+1, deploy.OpUpdate, "[provider: ")
-			writef(&b, deploy.OpDelete, "%s", old.Provider)
-			writeVerbatim(&b, deploy.OpUpdate, " => ")
-			if newProv.ID() == providers.UnknownID {
-				writef(&b, deploy.OpCreate, "%s", string(newProv.URN())+"::[unknown]")
+			if patchFormat {
+				// In patch format, expand provider change to two lines
+				writeIndentedfEx(&b, indent+1, deploy.OpDelete, true, patchFormat, "[provider=%s]\n", old.Provider)
+				newProvStr := new.Provider
+				if newProv.ID() == providers.UnknownID {
+					newProvStr = string(newProv.URN()) + "::[unknown]"
+				}
+				writeIndentedfEx(&b, indent+1, deploy.OpCreate, true, patchFormat, "[provider=%s]\n", newProvStr)
 			} else {
-				writef(&b, deploy.OpCreate, "%s", new.Provider)
+				writeUnprefixedIndentedf(&b, indent+1, deploy.OpUpdate, "[provider: ")
+				writef(&b, deploy.OpDelete, "%s", old.Provider)
+				writeVerbatim(&b, deploy.OpUpdate, " => ")
+				if newProv.ID() == providers.UnknownID {
+					writef(&b, deploy.OpCreate, "%s", string(newProv.URN())+"::[unknown]")
+				} else {
+					writef(&b, deploy.OpCreate, "%s", new.Provider)
+				}
+				writeVerbatim(&b, deploy.OpUpdate, "]\n")
 			}
-			writeVerbatim(&b, deploy.OpUpdate, "]\n")
 		} else {
 			prov, err := providers.ParseReference(step.Provider)
 			contract.Assertf(err == nil, "invalid provider reference %q: %v", step.Provider, err)
 
 			// Elide references to default providers.
 			if prov.URN().Name() != "default" {
-				writeUnprefixedIndentedf(&b, indent+1, simplePropOp, "[provider=%s]\n", step.Provider)
+				writeUnprefixedIndentedfEx(&b, indent+1, metadataOp, patchFormat, "[provider=%s]\n", step.Provider)
 			}
 		}
 	}
@@ -181,7 +260,7 @@ func getResourcePropertiesSummary(step engine.StepEventMetadata, indent int) str
 
 func getResourcePropertiesDetails(
 	step engine.StepEventMetadata, indent int, planning bool, summary bool, truncateOutput bool,
-	debug bool, showSecrets bool,
+	debug bool, showSecrets bool, patchFormat bool,
 ) string {
 	var b bytes.Buffer
 
@@ -198,23 +277,23 @@ func getResourcePropertiesDetails(
 	old, new := step.Old, step.New
 	if old == nil && new != nil {
 		if len(new.Outputs) > 0 {
-			PrintObject(&b, new.Outputs, planning, indent, step.Op, false, truncateOutput, debug, showSecrets)
+			PrintObject(&b, new.Outputs, planning, indent, step.Op, false, truncateOutput, debug, showSecrets, patchFormat)
 		} else {
-			PrintObject(&b, new.Inputs, planning, indent, step.Op, false, truncateOutput, debug, showSecrets)
+			PrintObject(&b, new.Inputs, planning, indent, step.Op, false, truncateOutput, debug, showSecrets, patchFormat)
 		}
 	} else if new == nil && old != nil {
 		// in summary view, we don't have to print out the entire object that is getting deleted.
 		// note, the caller will have already printed out the type/name/id/urn of the resource,
 		// and that's sufficient for a summarized deletion view.
 		if !summary {
-			PrintObject(&b, old.Inputs, planning, indent, step.Op, false, truncateOutput, debug, showSecrets)
+			PrintObject(&b, old.Inputs, planning, indent, step.Op, false, truncateOutput, debug, showSecrets, patchFormat)
 		}
 	} else if len(new.Outputs) > 0 && step.Op != deploy.OpImport && step.Op != deploy.OpImportReplacement {
 		printOldNewDiffs(&b, old.Outputs, new.Outputs, nil, planning, indent, step.Op,
-			summary, truncateOutput, debug, showSecrets, hideDiff)
+			summary, truncateOutput, debug, showSecrets, hideDiff, patchFormat)
 	} else {
 		printOldNewDiffs(&b, old.Inputs, new.Inputs, step.Diffs, planning, indent, step.Op,
-			summary, truncateOutput, debug, showSecrets, hideDiff)
+			summary, truncateOutput, debug, showSecrets, hideDiff, patchFormat)
 	}
 
 	return b.String()
@@ -233,7 +312,12 @@ func maxKey(keys []resource.PropertyKey) int {
 func PrintObject(
 	b *bytes.Buffer, props resource.PropertyMap, planning bool,
 	indent int, op display.StepOp, prefix bool, truncateOutput bool, debug bool, showSecrets bool,
+	patchFormat ...bool,
 ) {
+	pf := false
+	if len(patchFormat) > 0 {
+		pf = patchFormat[0]
+	}
 	p := propertyPrinter{
 		dest:           b,
 		planning:       planning,
@@ -243,6 +327,7 @@ func PrintObject(
 		debug:          debug,
 		truncateOutput: truncateOutput,
 		showSecrets:    showSecrets,
+		patchFormat:    pf,
 	}
 	p.printObject(props)
 }
@@ -367,7 +452,8 @@ func getResourceOutputsPropertiesString(
 	refresh,
 	showSames,
 	showSecrets,
-	truncateOutput bool,
+	truncateOutput,
+	patchFormat bool,
 ) string {
 	// During the actual update we always show all the outputs for the stack, even if they are unchanged.
 	if !showSames && !planning && step.URN.QualifiedType() == resource.RootStackType {
@@ -477,6 +563,7 @@ func getResourceOutputsPropertiesString(
 		debug:          debug,
 		showSecrets:    showSecrets,
 		truncateOutput: truncateOutput,
+		patchFormat:    patchFormat,
 	}
 
 	if len(hiddenDiffs) > 0 {
@@ -577,6 +664,7 @@ type propertyPrinter struct {
 	summary        bool
 	truncateOutput bool
 	showSecrets    bool
+	patchFormat    bool
 
 	indent int
 }
@@ -611,11 +699,11 @@ func (p *propertyPrinter) writeIndentedf(format string, a ...any) {
 			}
 		}
 	}
-	writeIndentedf(p.dest, p.indent, p.op, p.prefix, format, a...)
+	writeIndentedfEx(p.dest, p.indent, p.op, p.prefix, p.patchFormat, format, a...)
 }
 
 func (p *propertyPrinter) writeUnprefixedIndentedf(format string, a ...any) {
-	writeUnprefixedIndentedf(p.dest, p.indent, p.op, format, a...)
+	writeIndentedfEx(p.dest, p.indent, p.op, false, p.patchFormat, format, a...)
 }
 
 func (p *propertyPrinter) writef(format string, a ...any) {
@@ -751,7 +839,7 @@ func shortHash(hash string) string {
 func printOldNewDiffs(
 	b *bytes.Buffer, olds resource.PropertyMap, news resource.PropertyMap, include []resource.PropertyKey,
 	planning bool, indent int, op display.StepOp, summary bool, truncateOutput bool, debug bool, showSecrets bool,
-	hidePaths []resource.PropertyPath,
+	hidePaths []resource.PropertyPath, patchFormat bool,
 ) {
 	var hiddenDiffs []resource.PropertyPath
 
@@ -783,18 +871,22 @@ func printOldNewDiffs(
 	}
 
 	if diff != nil {
-		PrintObjectDiff(b, *diff, include, planning, indent, summary, truncateOutput, debug, showSecrets, hiddenDiffs)
+		PrintObjectDiff(b, *diff, include, planning, indent, summary, truncateOutput, debug, showSecrets, hiddenDiffs, patchFormat)
 	} else {
 		// If there's no diff, report the op as Same - there's no diff to render
 		// so it should be rendered as if nothing changed.
-		PrintObject(b, news, planning, indent, deploy.OpSame, true, truncateOutput, debug, showSecrets)
+		PrintObject(b, news, planning, indent, deploy.OpSame, true, truncateOutput, debug, showSecrets, patchFormat)
 	}
 }
 
 func PrintObjectDiff(b *bytes.Buffer, diff resource.ObjectDiff, include []resource.PropertyKey,
 	planning bool, indent int, summary bool, truncateOutput bool, debug bool, showSecrets bool,
-	hidden []resource.PropertyPath,
+	hidden []resource.PropertyPath, patchFormat ...bool,
 ) {
+	pf := false
+	if len(patchFormat) > 0 {
+		pf = patchFormat[0]
+	}
 	p := propertyPrinter{
 		dest:           b,
 		planning:       planning,
@@ -804,6 +896,7 @@ func PrintObjectDiff(b *bytes.Buffer, diff resource.ObjectDiff, include []resour
 		summary:        summary,
 		truncateOutput: truncateOutput,
 		showSecrets:    showSecrets,
+		patchFormat:    pf,
 	}
 	p.printHiddenPaths(hidden)
 	p.printObjectDiff(diff, include)
@@ -901,12 +994,44 @@ func (p *propertyPrinter) printPropertyValueDiff(titleFunc func(*propertyPrinter
 			}
 
 			if isPrimitive(diff.Old) && isPrimitive(diff.New) {
-				titleFunc(p)
-
+				// For string diffs, try structural diff first (handles JSON/YAML)
 				if diff.Old.IsString() && diff.New.IsString() {
-					p.printTextDiff(diff.Old.StringValue(), diff.New.StringValue())
+					oldStr, newStr := diff.Old.StringValue(), diff.New.StringValue()
+					// Check if both strings decode to JSON/YAML for structural diff
+					if _, _, ok := p.decodeValue(oldStr); ok {
+						if _, _, ok := p.decodeValue(newStr); ok {
+							// Both decode - use structural diff
+							if p.patchFormat {
+								// In patch format, title is context line (property exists, parts changing)
+								titleFunc(p.withOp(deploy.OpSame))
+							} else {
+								titleFunc(p)
+							}
+							p.printEncodedValueDiff(oldStr, newStr)
+							return
+						}
+					}
+					// Not both decodable - fall through to primitive diff
+					if !p.patchFormat {
+						titleFunc(p)
+						p.printTextDiff(oldStr, newStr)
+						return
+					}
+					// patchFormat with non-decodable strings falls through to delete/add below
+				}
+
+				if p.patchFormat {
+					// In patch format, output two lines: - oldValue, + newValue
+					titleFunc(p.withOp(deploy.OpDelete).withPrefix(true))
+					p.withOp(deploy.OpDelete).printPrimitivePropertyValue(diff.Old)
+					p.writeVerbatim("\n")
+					titleFunc(p.withOp(deploy.OpCreate).withPrefix(true))
+					p.withOp(deploy.OpCreate).printPrimitivePropertyValue(diff.New)
+					p.writeVerbatim("\n")
 					return
 				}
+
+				titleFunc(p)
 
 				p.withOp(deploy.OpDelete).printPrimitivePropertyValue(diff.Old)
 				p.writeVerbatim(" => ")
@@ -953,8 +1078,17 @@ func (p *propertyPrinter) printPrimitivePropertyValue(v resource.PropertyValue) 
 		}
 	} else if v.IsString() {
 		if vv, kind, ok := p.decodeValue(v.StringValue()); ok {
-			p.writef("(%s) ", kind)
-			p.printPropertyValue(vv)
+			if !p.patchFormat {
+				// In patch format, omit the (json)/(yaml) annotation
+				p.writef("(%s) ", kind)
+			}
+			if p.patchFormat {
+				// In patch format, use printPropertyValueRecurse to avoid double newline -
+				// the caller's printPropertyValue will add the final newline
+				p.printPropertyValueRecurse(vv)
+			} else {
+				p.printPropertyValue(vv)
+			}
 			return
 		}
 		if p.truncateOutput {
@@ -1204,6 +1338,27 @@ func (p *propertyPrinter) printTextDiff(old, new string) {
 }
 
 func (p *propertyPrinter) printCharacterDiff(diffs []diffmatchpatch.Diff) {
+	if p.patchFormat {
+		// In patch format, reconstruct and output old/new strings as two separate lines.
+		var oldText, newText strings.Builder
+		for _, d := range diffs {
+			switch d.Type {
+			case diffmatchpatch.DiffDelete:
+				oldText.WriteString(d.Text)
+			case diffmatchpatch.DiffEqual:
+				oldText.WriteString(d.Text)
+				newText.WriteString(d.Text)
+			case diffmatchpatch.DiffInsert:
+				newText.WriteString(d.Text)
+			}
+		}
+		p.withOp(deploy.OpDelete).writef("%q", oldText.String())
+		p.writeVerbatim("\n")
+		p.withOp(deploy.OpCreate).writef("%q", newText.String())
+		p.writeVerbatim("\n")
+		return
+	}
+
 	// write the old text.
 	p.writeVerbatim(`"`)
 	for _, d := range diffs {
@@ -1321,10 +1476,13 @@ func (p *propertyPrinter) printEncodedValueDiff(old, new string) bool {
 		return true
 	}
 
-	if oldKind == newKind {
-		p.writef("(%s) ", oldKind)
-	} else {
-		p.writef("(%s => %s) ", oldKind, newKind)
+	if !p.patchFormat {
+		// In patch format, omit the (json)/(yaml) annotation
+		if oldKind == newKind {
+			p.writef("(%s) ", oldKind)
+		} else {
+			p.writef("(%s => %s) ", oldKind, newKind)
+		}
 	}
 
 	diff := oldValue.Diff(newValue, resource.IsInternalPropertyKey)

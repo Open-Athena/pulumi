@@ -176,6 +176,93 @@ func Test_PrintObject(t *testing.T) {
 	}
 }
 
+func Test_PrintObjectDiff_PatchFormat(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name        string
+		oldObject   resource.PropertyMap
+		newObject   resource.PropertyMap
+		patchFormat bool
+		expected    string
+	}{
+		{
+			name: "primitive_change_standard_format",
+			oldObject: resource.NewPropertyMapFromMap(map[string]any{
+				"value": 10,
+			}),
+			newObject: resource.NewPropertyMapFromMap(map[string]any{
+				"value": 20,
+			}),
+			patchFormat: false,
+			// Standard format: old => new on same line
+			expected: "<{%fg 3%}>  ~ value: <{%reset%}><{%fg 1%}>10<{%reset%}><{%fg 3%}> => <{%reset%}><{%fg 2%}>20<{%reset%}><{%fg 3%}>\n<{%reset%}>",
+		},
+		{
+			name: "primitive_change_patch_format",
+			oldObject: resource.NewPropertyMapFromMap(map[string]any{
+				"value": 10,
+			}),
+			newObject: resource.NewPropertyMapFromMap(map[string]any{
+				"value": 20,
+			}),
+			patchFormat: true,
+			// Patch format: markers at column 0, then indentation
+			expected: "<{%fg 1%}>-   value: <{%reset%}><{%fg 1%}>10<{%reset%}><{%fg 3%}>\n<{%reset%}><{%fg 2%}>+   value: <{%reset%}><{%fg 2%}>20<{%reset%}><{%fg 3%}>\n<{%reset%}>",
+		},
+		{
+			name: "string_change_patch_format",
+			oldObject: resource.NewPropertyMapFromMap(map[string]any{
+				"name": "old-value",
+			}),
+			newObject: resource.NewPropertyMapFromMap(map[string]any{
+				"name": "new-value",
+			}),
+			patchFormat: true,
+			// Patch format for strings: markers at column 0
+			expected: "<{%fg 1%}>-   name: <{%reset%}><{%fg 1%}>\"old-value\"<{%reset%}><{%fg 3%}>\n<{%reset%}><{%fg 2%}>+   name: <{%reset%}><{%fg 2%}>\"new-value\"<{%reset%}><{%fg 3%}>\n<{%reset%}>",
+		},
+		{
+			name: "json_structural_diff_patch_format",
+			oldObject: resource.NewPropertyMapFromMap(map[string]any{
+				"policy": `{"Version":"2012-10-17","Statement":[{"Action":["iam:GetRole"],"Effect":"Allow"}]}`,
+			}),
+			newObject: resource.NewPropertyMapFromMap(map[string]any{
+				"policy": `{"Version":"2012-10-17","Statement":[{"Action":["iam:GetRole","iam:ListRoles"],"Effect":"Allow"}]}`,
+			}),
+			patchFormat: true,
+			// Patch format for JSON: structural diff showing only the changed element
+			// Should NOT show entire object as -old/+new, but rather drill into the change
+			expected: "" +
+				"<{%reset%}>    policy: <{%reset%}><{%fg 3%}>{\n<{%reset%}>" +
+				"<{%fg 3%}>        Statement: <{%reset%}><{%fg 3%}>[\n<{%reset%}>" +
+				"<{%fg 3%}>            [0]: <{%reset%}><{%fg 3%}>{\n<{%reset%}>" +
+				"<{%fg 3%}>                    Action: <{%reset%}><{%fg 3%}>[\n<{%reset%}>" +
+				"<{%reset%}>                        [0]: <{%reset%}><{%reset%}>\"iam:GetRole\"<{%reset%}><{%reset%}>\n<{%reset%}>" +
+				"<{%fg 2%}>+                       [1]: <{%reset%}><{%fg 2%}>\"iam:ListRoles\"<{%reset%}><{%fg 2%}>\n<{%reset%}>" +
+				"<{%fg 3%}>                    ]\n<{%reset%}>" +
+				"<{%reset%}>                    Effect: <{%reset%}><{%reset%}>\"Allow\"<{%reset%}><{%reset%}>\n<{%reset%}>" +
+				"<{%fg 3%}>                }\n<{%reset%}>" +
+				"<{%fg 3%}>        ]\n<{%reset%}>" +
+				"<{%reset%}>        Version  : <{%reset%}><{%reset%}>\"2012-10-17\"<{%reset%}><{%reset%}>\n<{%reset%}>" +
+				"<{%fg 3%}>    }\n<{%reset%}>",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			diff := c.oldObject.Diff(c.newObject, resource.IsInternalPropertyKey)
+			require.NotNil(t, diff, "expected a diff")
+
+			var buf bytes.Buffer
+			PrintObjectDiff(&buf, *diff, nil, false, 1, false, false, false, false, nil, c.patchFormat)
+			assert.Equal(t, c.expected, buf.String())
+		})
+	}
+}
+
 func TestGetResourceOutputsPropertiesString(t *testing.T) {
 	t.Parallel()
 
@@ -410,6 +497,7 @@ func TestGetResourceOutputsPropertiesString(t *testing.T) {
 				tt.showSames,      /* showSames */
 				tt.showSecrets,    /* showSecrets */
 				tt.truncateOutput, /* truncateOutput */
+				false,             /* patchFormat */
 			)
 			require.Equal(t, tt.expected, s)
 		})

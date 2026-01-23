@@ -58,6 +58,7 @@ type Options struct {
 	SuppressProgress         bool                // true to suppress displaying progress spinner.
 	ShowSecrets              bool                // true to display secrets in the output.
 	SuppressDiagEventsInDiff bool                // true to suppress displaying diagnostic events in the diff display
+	PatchFormat              bool                // true to emit unified diff format for property changes (- for removed, + for added)
 
 	// Neo options
 	ShowLinkToNeo   bool // true to display a 'explainFailure' link to Neo.
