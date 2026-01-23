@@ -39,6 +39,9 @@ import (
 
 // Context represents the way that [InstallPlugin] and [InstallProjectPlugins] interact with
 // the environment.
+//
+// This allows functions like [InstallPlugin] & [InstallProjectPlugins] to remain pure, and
+// thus unit testable.
 type Context interface {
 	pluginstorage.Context
 	pkgWorkspace.Context
@@ -131,7 +134,7 @@ func InstallPlugin(
 	var runBundle runBundle
 
 	err := runInstall(ctx, options, registry, ws, func(ctx context.Context, state state, root pdag.Node) error {
-		return ensureUnresolvedSpec(ctx, state, root, spec, project[workspace.BaseProject]{
+		return enqueueUnresolvedPackage(ctx, state, root, spec, project[workspace.BaseProject]{
 			proj:       baseProject,
 			projectDir: projectDir,
 		}, &runBundle)
@@ -156,20 +159,22 @@ func InstallProjectPlugins(
 	project_ workspace.BaseProject, projectDir string,
 	options Options, registry registry.Registry, ws Context,
 ) error {
-	setup := func(ctx context.Context, state state, root pdag.Node) error {
-		return ensureProjectDependencies(ctx, state, root, project[workspace.BaseProject]{
+	return runInstall(ctx, options, registry, ws, func(ctx context.Context, state state, root pdag.Node) error {
+		return enqueueProjectDependencies(ctx, state, root, project[workspace.BaseProject]{
 			proj:       project_,
 			projectDir: projectDir,
 		})
-	}
-
-	return runInstall(ctx, options, registry, ws, setup)
+	})
 }
 
+// runInstall an install governed by [pdag].
+//
+// enqueue should add some nodes to the passed root, then runInstall will drive the DAG to
+// completion.
 func runInstall(
 	ctx context.Context,
 	options Options, registry registry.Registry, ws Context,
-	setup func(ctx context.Context, state state, root pdag.Node) error,
+	enqueue func(ctx context.Context, state state, root pdag.Node) error,
 ) error {
 	dag := pdag.New[step]()
 	root, rootReady := dag.NewNode(noOpStep{})
@@ -196,7 +201,7 @@ func runInstall(
 		}
 	}()
 
-	if err := setup(ctx, state, root); err != nil {
+	if err := enqueue(ctx, state, root); err != nil {
 		return err
 	}
 
@@ -236,6 +241,10 @@ func wrapCycleError(err error) error {
 	return ErrorCyclicDependencies{Cycle: chain, underlying: err}
 }
 
+// pluginMarkerStep is a labeling step that tells the [wrapCycleError] that we are requiring
+// a [workspace.PluginDescriptor].
+//
+// Running this step is a no-op.
 type pluginMarkerStep struct{ spec workspace.PluginDescriptor }
 
 func (step pluginMarkerStep) run(context.Context, state) error { return nil }
@@ -277,16 +286,21 @@ func hashLocalPath(path string) pluginHash {
 	return pluginHash(h.Sum64())
 }
 
+// runBundle represents the information necessary to actually run a plugin.
 type runBundle struct {
-	name       string
-	pluginPath string
-	params     plugin.ParameterizeParameters
+	name       string                        // The name of the plugin.
+	pluginPath string                        // Where the plugin is on disk. This may be a folder or an executable.
+	params     plugin.ParameterizeParameters // The parameterization of the plugin. May be nil.
 }
 
+// A step in the install/build graph.
 type step interface {
 	run(ctx context.Context, p state) error
 }
 
+// The global state of a package install run.
+//
+// state is available to all running [step]s in parallel.
 type state struct {
 	ws       Context
 	registry registry.Registry
@@ -297,6 +311,10 @@ type state struct {
 	seen  map[pluginHash]cachedPlugin
 	seenM *sync.Mutex
 
+	// A list of functions, to be called in arbitrary order before the install run is
+	// finished.
+	//
+	// [step]s that mutate cleanupFuncs must hold cleanupM.
 	cleanupFuncs []func()
 	cleanupM     *sync.Mutex
 }
@@ -306,6 +324,8 @@ type cachedPlugin struct {
 	runBundle *runBundle
 }
 
+// A step that does nothing. Useful for creating nodes in the DAG and then deciding later
+// what you need them for.
 type noOpStep struct{}
 
 func (noOpStep) run(context.Context, state) error { return nil }
@@ -315,7 +335,11 @@ type project[T workspace.BaseProject] struct {
 	projectDir string
 }
 
-func ensureUnresolvedSpec(
+// Enqueue an unresolved package to be resolved and then downloaded/installed as
+// appropriate.
+//
+// The full package will be added as a dependency on the passed in parent node.
+func enqueueUnresolvedPackage(
 	_ context.Context,
 	state state, parent pdag.Node,
 	spec workspace.PackageSpec, parentProj project[workspace.BaseProject],
@@ -342,17 +366,19 @@ func ensureUnresolvedSpec(
 	return nil
 }
 
+// copyStep represents a scheduled copy from src to dst.
 type copyStep[T any] struct {
 	src, dst *T
 }
 
 func (step copyStep[T]) run(context.Context, state) error { *step.dst = *step.src; return nil }
 
-// Add nodes to dag to ensure that:
+// Add package specs depended on by a project to the graph.
 //
+// parent will not be ready until:
 // 1. Each project dependency is downloaded and installed.
 // 2.Each project dependency is *linked*.
-func ensureProjectDependencies(
+func enqueueProjectDependencies(
 	ctx context.Context,
 	state state, parent pdag.Node,
 	proj project[workspace.BaseProject],
@@ -376,7 +402,7 @@ func ensureProjectDependencies(
 		defer linkReady()
 		contract.AssertNoErrorf(state.dag.NewEdge(link, parent), "new nodes cannot be cyclic")
 
-		err := ensureUnresolvedSpec(ctx, state, link, source, proj, runBundle)
+		err := enqueueUnresolvedPackage(ctx, state, link, source, proj, runBundle)
 		if err != nil {
 			return err
 		}
@@ -384,7 +410,11 @@ func ensureProjectDependencies(
 	return nil
 }
 
-func ensureDownloadedPluginDirHasDependenciesAndIsInstalled(
+// Add to the graph a install step for a downloaded plugin if appropriate.
+//
+// We only do an install step for plugins that hava a PulumiPlugin.yaml. Binary plugins do
+// not need to be installed.
+func enqueueDownloadedPluginDirHasDependenciesAndIsInstalled(
 	ctx context.Context, state state,
 	parent pdag.Node, name, projectDir string,
 	downloadCleanup *downloadCleanup,
@@ -409,7 +439,7 @@ func ensureDownloadedPluginDirHasDependenciesAndIsInstalled(
 		contract.AssertNoErrorf(state.dag.NewEdge(install, parent), "new nodes cannot be cyclic")
 		defer installReady()
 
-		return ensureProjectDependencies(ctx, state, install, project[workspace.BaseProject]{
+		return enqueueProjectDependencies(ctx, state, install, project[workspace.BaseProject]{
 			proj:       pluginProject,
 			projectDir: projectDir,
 		})
@@ -460,6 +490,7 @@ func ensureProjectDir(
 	}
 }
 
+// Link an already downloaded and installed package into a project.
 type linkPackageStep struct {
 	// The name of the package, as described in the Pulumi or PulumiPlugin packages
 	// section.
@@ -603,7 +634,7 @@ func (step resolveStep) run(ctx context.Context, p state) error {
 
 		// We don't need to download what's at a local path result, but we might
 		// need to download it's dependencies.
-		return ensureDownloadedPluginDirHasDependenciesAndIsInstalled(ctx,
+		return enqueueDownloadedPluginDirHasDependenciesAndIsInstalled(ctx,
 			p, specNode, "", projectDir, nil, step.runBundleOut)
 
 	// We have a normal spec to download and install, so let's run that process.
@@ -730,7 +761,7 @@ func (step downloadStep) run(ctx context.Context, p state) error {
 	p.cleanupM.Unlock()
 
 	step.runBundleOut.pluginPath = pluginDir
-	return ensureDownloadedPluginDirHasDependenciesAndIsInstalled(
+	return enqueueDownloadedPluginDirHasDependenciesAndIsInstalled(
 		ctx, p, step.parent, step.spec.Name, pluginDir, step.downloadCleanup, step.runBundleOut)
 }
 
