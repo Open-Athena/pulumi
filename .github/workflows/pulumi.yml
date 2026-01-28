@@ -1,0 +1,215 @@
+name: Pulumi
+run-name: '${{ inputs.stack }}: pulumi ${{ inputs.cmd }}'
+
+on:
+  workflow_call:
+    inputs:
+      cmd:
+        description: 'Pulumi command (preview, up, refresh)'
+        required: true
+        type: string
+      stack:
+        description: 'Pulumi stack name'
+        required: true
+        type: string
+      working-directory:
+        description: 'Directory containing Pulumi project'
+        required: false
+        default: '.'
+        type: string
+      python-version:
+        description: 'Python version to use'
+        required: false
+        default: '3.11'
+        type: string
+      aws-region:
+        description: 'AWS region'
+        required: false
+        default: 'us-east-1'
+        type: string
+      aws-role:
+        description: 'AWS role ARN to assume (overrides AWS_ROLE_ARN var)'
+        required: false
+        type: string
+      comment-on-pr:
+        description: 'Post output as PR comment'
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      PULUMI_ACCESS_TOKEN:
+        description: 'Pulumi Cloud access token (if using Pulumi Cloud backend)'
+        required: false
+
+# Pulumi fork with --patch flag for GitHub-compatible diff output
+# https://github.com/Open-Athena/pulumi/commit/b26b41759db0851a53b050b7d33a6e46eb8c5502
+env:
+  PULUMI_FORK_SHA: b26b41759db0851a53b050b7d33a6e46eb8c5502
+
+jobs:
+  pulumi:
+    name: 'pulumi ${{ inputs.cmd }}'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # GCP auth for Pulumi backend (gs://...) - only if vars are set
+      - name: Authenticate to Google Cloud
+        if: vars.GCP_WORKLOAD_IDENTITY_PROVIDER != ''
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      # AWS auth - use input, then var, then skip
+      - name: Configure AWS Credentials
+        if: inputs.aws-role != '' || vars.PULUMI_AWS_ROLE != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws-role || vars.PULUMI_AWS_ROLE }}
+          role-session-name: pulumi-github-actions
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if [ -f pyproject.toml ]; then
+            uv pip install --system -e .
+          elif [ -f requirements.txt ]; then
+            uv pip install --system -r requirements.txt
+          fi
+
+      - name: Cache Pulumi binary
+        id: cache-pulumi
+        uses: actions/cache@v4
+        with:
+          path: ~/.pulumi/bin/pulumi
+          key: pulumi-${{ runner.os }}-${{ env.PULUMI_FORK_SHA }}
+
+      - name: Setup Go (for building Pulumi)
+        if: steps.cache-pulumi.outputs.cache-hit != 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build Pulumi from fork
+        if: steps.cache-pulumi.outputs.cache-hit != 'true'
+        run: |
+          git init pulumi-src
+          cd pulumi-src
+          git fetch --depth 1 https://github.com/Open-Athena/pulumi.git "$PULUMI_FORK_SHA"
+          git checkout "$PULUMI_FORK_SHA"
+          cd pkg
+          go build -o $HOME/.pulumi/bin/pulumi ./cmd/pulumi
+
+      - name: Add Pulumi to PATH
+        run: echo "$HOME/.pulumi/bin" >> $GITHUB_PATH
+
+      - name: Set Pulumi access token
+        if: secrets.PULUMI_ACCESS_TOKEN != ''
+        run: echo "PULUMI_ACCESS_TOKEN=${{ secrets.PULUMI_ACCESS_TOKEN }}" >> $GITHUB_ENV
+
+      - name: Run Pulumi ${{ inputs.cmd }}
+        id: pulumi
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          set -o pipefail
+
+          pulumi stack select ${{ inputs.stack }}
+
+          # Remove profile if set (use env vars instead)
+          pulumi config rm aws:profile 2>/dev/null || true
+
+          case "${{ inputs.cmd }}" in
+            preview)
+              pulumi preview --patch --non-interactive 2>&1 | tee pulumi-output.txt
+              ;;
+            up)
+              pulumi up --yes --non-interactive 2>&1 | tee pulumi-output.txt
+              ;;
+            refresh)
+              pulumi refresh --yes --non-interactive 2>&1 | tee pulumi-output.txt
+              ;;
+            *)
+              echo "::error::Unknown command: ${{ inputs.cmd }}"
+              exit 1
+              ;;
+          esac
+
+      - name: Comment on PR
+        if: inputs.comment-on-pr && always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          # Find PR for this branch
+          PR_NUMBER=$(gh pr list --head "${{ github.ref_name }}" --json number --jq '.[0].number')
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No PR found for branch ${{ github.ref_name }}"
+            exit 0
+          fi
+
+          # Get job ID and step number for deep link
+          JOB_JSON=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
+            --jq '.jobs[] | select(.name | contains("pulumi"))')
+          JOB_ID=$(echo "$JOB_JSON" | jq -r '.id')
+          STEP_NUM=$(echo "$JOB_JSON" | jq -r '.steps[] | select(.name | contains("Run Pulumi")) | .number')
+
+          STATUS="${{ steps.pulumi.outcome }}"
+          if [ "$STATUS" = "success" ]; then
+            ICON="✅"
+          else
+            ICON="❌"
+          fi
+
+          SHORT_SHA="${{ github.sha }}"
+          SHORT_SHA="${SHORT_SHA:0:7}"
+
+          JOB_LINK="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/job/${JOB_ID}#step:${STEP_NUM}:1"
+          COMMIT_LINK="${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}"
+
+          # Dynamic fence length: one longer than any backtick run in content (min 3)
+          MAX=$(grep -oE '\`+' pulumi-output.txt | awk '{print length}' | sort -rn | head -1)
+          FENCE=$(printf '`%.0s' $(seq 1 $(( ${MAX:-0} > 2 ? MAX + 1 : 3 ))))
+
+          {
+            echo "## ${ICON} Pulumi ${{ inputs.cmd }} ([${SHORT_SHA}](${COMMIT_LINK}))"
+            echo ""
+            echo "<details>"
+            echo "<summary>Output</summary>"
+            echo ""
+            echo "${FENCE}diff"
+            cat pulumi-output.txt
+            echo "$FENCE"
+            echo ""
+            echo "</details>"
+            echo ""
+            echo "[Workflow logs](${JOB_LINK})"
+          } > comment-body.md
+
+          gh pr comment "$PR_NUMBER" --body-file comment-body.md
+
+      - name: Export outputs
+        if: inputs.cmd == 'up'
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          echo "### Pulumi Stack Outputs" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          pulumi stack output --json >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

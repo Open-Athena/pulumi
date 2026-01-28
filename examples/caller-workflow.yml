@@ -1,0 +1,38 @@
+# Example: How ops would call the reusable workflow
+# This replaces the current inline .github/workflows/oa-ci.yml
+
+name: AWS oa-ci Pulumi stack
+run-name: '${{ inputs.stack }}: pulumi ${{ inputs.cmd }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      cmd:
+        description: 'Pulumi command to run (preview, up, refresh)'
+        required: true
+        default: 'preview'
+        type: choice
+        options:
+          - preview
+          - up
+          - refresh
+      stack:
+        description: 'Pulumi stack name'
+        required: true
+        default: 'dev'
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+  actions: read
+
+jobs:
+  pulumi:
+    uses: Open-Athena/pulumi/.github/workflows/pulumi.yml@v1
+    with:
+      cmd: ${{ inputs.cmd }}
+      stack: ${{ inputs.stack }}
+      working-directory: aws/oa-ci
+    secrets: inherit
