@@ -12,6 +12,10 @@ on:
         description: 'Pulumi stack name'
         required: true
         type: string
+      project:
+        description: 'Project name (for display in PR comments)'
+        required: false
+        type: string
       working-directory:
         description: 'Directory containing Pulumi project'
         required: false
@@ -203,7 +207,7 @@ jobs:
           FENCE=$(printf '`%.0s' $(seq 1 $(( ${MAX:-0} > 2 ? MAX + 1 : 3 ))))
 
           {
-            echo "## ${ICON} Pulumi ${{ inputs.cmd }} ([${SHORT_SHA}](${COMMIT_LINK}))"
+            echo "## ${ICON} ${{ inputs.project && format('{0}: ', inputs.project) || '' }}pulumi ${{ inputs.cmd }} ([${SHORT_SHA}](${COMMIT_LINK}))"
             echo ""
             echo "<details>"
             echo "<summary>Output</summary>"
