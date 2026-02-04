@@ -40,15 +40,20 @@ on:
         required: false
         default: true
         type: boolean
+      pulumi-sha:
+        description: 'SHA of Pulumi fork with --patch support'
+        required: false
+        default: 'a2b415984ed69668323572cc4df274992932c304'
+        type: string
     secrets:
       PULUMI_ACCESS_TOKEN:
         description: 'Pulumi Cloud access token (if using Pulumi Cloud backend)'
         required: false
 
 # Pulumi fork with --patch flag for GitHub-compatible diff output
-# https://github.com/Open-Athena/pulumi/commit/b26b41759db0851a53b050b7d33a6e46eb8c5502
+# https://github.com/Open-Athena/pulumi/commits/patch
 env:
-  PULUMI_FORK_SHA: b26b41759db0851a53b050b7d33a6e46eb8c5502
+  PULUMI_FORK_SHA: ${{ inputs.pulumi-sha }}
 
 jobs:
   pulumi:
