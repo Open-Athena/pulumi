@@ -17,6 +17,10 @@ on:
         required: false
         default: '.'
         type: string
+      deps-directory:
+        description: 'Directory containing pyproject.toml or requirements.txt (defaults to working-directory)'
+        required: false
+        type: string
       python-version:
         description: 'Python version to use'
         required: false
@@ -87,7 +91,7 @@ jobs:
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Install dependencies
-        working-directory: ${{ inputs.working-directory }}
+        working-directory: ${{ inputs.deps-directory || inputs.working-directory }}
         run: |
           if [ -f pyproject.toml ]; then
             uv pip install --system -e .
