@@ -231,19 +231,16 @@ func Test_PrintObjectDiff_PatchFormat(t *testing.T) {
 				"policy": `{"Version":"2012-10-17","Statement":[{"Action":["iam:GetRole","iam:ListRoles"],"Effect":"Allow"}]}`,
 			}),
 			patchFormat: true,
-			// Patch format for JSON: structural diff showing only the changed element
-			// Should NOT show entire object as -old/+new, but rather drill into the change
+			// Patch format for JSON: YAML-based text diff showing only the changed element
+			// Uses Myers diff on serialized YAML for minimal, accurate diffs
 			expected: "" +
 				"<{%reset%}>    policy: <{%reset%}><{%fg 3%}>{\n<{%reset%}>" +
-				"<{%fg 3%}>        Statement: <{%reset%}><{%fg 3%}>[\n<{%reset%}>" +
-				"<{%fg 3%}>            [0]: <{%reset%}><{%fg 3%}>{\n<{%reset%}>" +
-				"<{%fg 3%}>                    Action: <{%reset%}><{%fg 3%}>[\n<{%reset%}>" +
-				"<{%reset%}>                        [0]: <{%reset%}><{%reset%}>\"iam:GetRole\"<{%reset%}><{%reset%}>\n<{%reset%}>" +
-				"<{%fg 2%}>+                       [1]: <{%reset%}><{%fg 2%}>\"iam:ListRoles\"<{%reset%}><{%fg 2%}>\n<{%reset%}>" +
-				"<{%fg 3%}>                    ]\n<{%reset%}>" +
-				"<{%reset%}>                    Effect: <{%reset%}><{%reset%}>\"Allow\"<{%reset%}><{%reset%}>\n<{%reset%}>" +
-				"<{%fg 3%}>                }\n<{%reset%}>" +
-				"<{%fg 3%}>        ]\n<{%reset%}>" +
+				"<{%reset%}>        Statement: <{%reset%}><{%fg 3%}>[\n<{%reset%}>" +
+				"         - Action:\n" +
+				"             - iam:GetRole\n" +
+				"<{%fg 2%}>+            - iam:ListRoles<{%reset%}>\n" +
+				"           Effect: Allow\n" +
+				"<{%fg 3%}>        ]<{%reset%}><{%fg 3%}>\n<{%reset%}>" +
 				"<{%reset%}>        Version  : <{%reset%}><{%reset%}>\"2012-10-17\"<{%reset%}><{%reset%}>\n<{%reset%}>" +
 				"<{%fg 3%}>    }\n<{%reset%}>",
 		},

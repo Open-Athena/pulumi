@@ -954,6 +954,17 @@ func (p *propertyPrinter) printPropertyValueDiff(titleFunc func(*propertyPrinter
 	contract.Assertf(p.indent > 0, "indentation must be > 0 to print property value diffs")
 
 	if diff.Array != nil {
+		// In patch format, use YAML-based text diff for minimal, accurate array diffs
+		// This avoids the "delete from middle shows all elements changing" problem
+		if p.patchFormat {
+			titleFunc(p.withOp(deploy.OpSame))
+			if p.printYAMLDiff(diff.Old, diff.New) {
+				p.writeVerbatim("\n")
+				return
+			}
+			// Fall through to standard diff if YAML diff fails
+		}
+
 		titleFunc(p)
 		p.writeVerbatim("[\n")
 
@@ -1634,4 +1645,123 @@ func (p *propertyPrinter) truncatePropertyString(propertyString string) string {
 	}
 
 	return strings.Join(lines[:numLines], "\n") + "\n..."
+}
+
+// propertyValueToInterface converts a PropertyValue to a plain Go interface{} for YAML serialization.
+func propertyValueToInterface(v resource.PropertyValue) any {
+	switch {
+	case v.IsNull():
+		return nil
+	case v.IsBool():
+		return v.BoolValue()
+	case v.IsNumber():
+		return v.NumberValue()
+	case v.IsString():
+		return v.StringValue()
+	case v.IsArray():
+		arr := v.ArrayValue()
+		result := make([]any, len(arr))
+		for i, elem := range arr {
+			result[i] = propertyValueToInterface(elem)
+		}
+		return result
+	case v.IsObject():
+		obj := v.ObjectValue()
+		result := make(map[string]any)
+		for k, val := range obj {
+			result[string(k)] = propertyValueToInterface(val)
+		}
+		return result
+	case v.IsComputed():
+		return "[computed]"
+	case v.IsOutput():
+		o := v.OutputValue()
+		if o.Known {
+			return propertyValueToInterface(o.Element)
+		}
+		return "[unknown]"
+	case v.IsSecret():
+		return "[secret]"
+	default:
+		return fmt.Sprintf("%v", v.V)
+	}
+}
+
+// printYAMLDiff prints a YAML-based text diff of two property values.
+// This uses Myers diff algorithm on the serialized YAML for minimal, accurate diffs.
+// Returns true if it successfully printed a diff, false if it couldn't.
+func (p *propertyPrinter) printYAMLDiff(old, new resource.PropertyValue) bool {
+	oldVal := propertyValueToInterface(old)
+	newVal := propertyValueToInterface(new)
+
+	oldYAML, err := yaml.Marshal(oldVal)
+	if err != nil {
+		return false
+	}
+	newYAML, err := yaml.Marshal(newVal)
+	if err != nil {
+		return false
+	}
+
+	// Use line-mode diff for cleaner output
+	dmp := diffmatchpatch.New()
+	oldStr, newStr, lineArray := dmp.DiffLinesToChars(string(oldYAML), string(newYAML))
+	diffs := dmp.DiffMain(oldStr, newStr, false)
+	diffs = dmp.DiffCharsToLines(diffs, lineArray)
+	diffs = dmp.DiffCleanupSemantic(diffs)
+
+	// Check if there are actual differences
+	hasDiff := false
+	for _, d := range diffs {
+		if d.Type != diffmatchpatch.DiffEqual {
+			hasDiff = true
+			break
+		}
+	}
+	if !hasDiff {
+		return false
+	}
+
+	// Determine bracket type based on value type
+	openBracket, closeBracket := "{", "}"
+	if old.IsArray() || new.IsArray() {
+		openBracket, closeBracket = "[", "]"
+	}
+
+	// Print with proper markers and indentation
+	baseIndent := strings.Repeat("    ", p.indent)
+	p.writeVerbatim(openBracket + "\n")
+
+	for _, d := range diffs {
+		lines := strings.Split(strings.TrimSuffix(d.Text, "\n"), "\n")
+		for _, line := range lines {
+			if line == "" {
+				continue
+			}
+			switch d.Type {
+			case diffmatchpatch.DiffDelete:
+				writeString(p.dest, deploy.Color(deploy.OpDelete))
+				writeString(p.dest, "-")
+				writeString(p.dest, baseIndent)
+				writeString(p.dest, line)
+				writeString(p.dest, colors.Reset)
+				writeString(p.dest, "\n")
+			case diffmatchpatch.DiffInsert:
+				writeString(p.dest, deploy.Color(deploy.OpCreate))
+				writeString(p.dest, "+")
+				writeString(p.dest, baseIndent)
+				writeString(p.dest, line)
+				writeString(p.dest, colors.Reset)
+				writeString(p.dest, "\n")
+			case diffmatchpatch.DiffEqual:
+				writeString(p.dest, " ")
+				writeString(p.dest, baseIndent)
+				writeString(p.dest, line)
+				writeString(p.dest, "\n")
+			}
+		}
+	}
+
+	p.writeUnprefixedIndentedf("%s", closeBracket)
+	return true
 }
