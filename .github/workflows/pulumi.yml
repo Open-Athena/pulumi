@@ -130,9 +130,14 @@ jobs:
       - name: Add Pulumi to PATH
         run: echo "$HOME/.pulumi/bin" >> $GITHUB_PATH
 
+      # Set Pulumi access token if provided (for Pulumi Cloud backend)
       - name: Set Pulumi access token
-        if: secrets.PULUMI_ACCESS_TOKEN != ''
-        run: echo "PULUMI_ACCESS_TOKEN=${{ secrets.PULUMI_ACCESS_TOKEN }}" >> $GITHUB_ENV
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+        run: |
+          if [ -n "$PULUMI_ACCESS_TOKEN" ]; then
+            echo "PULUMI_ACCESS_TOKEN=$PULUMI_ACCESS_TOKEN" >> $GITHUB_ENV
+          fi
 
       - name: Run Pulumi ${{ inputs.cmd }}
         id: pulumi
