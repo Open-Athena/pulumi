@@ -1,3 +1,18 @@
+> **[Open Athena] fork** of [pulumi/pulumi] adding a `--patch` flag to `pulumi preview`, which outputs resource diffs in unified diff format (compatible with GitHub's `diff` syntax highlighting).
+>
+> ### Branches
+> - **[`patch-format`]** (default): fork of `main` with `--patch` support
+> - **[`v1`]**: reusable GitHub Actions workflow that builds this fork and runs `pulumi preview --patch`, with PR comment support
+>
+> See [upstream README][pulumi/pulumi] for general Pulumi documentation.
+
+[Open Athena]: https://github.com/Open-Athena
+[pulumi/pulumi]: https://github.com/pulumi/pulumi
+[`patch-format`]: https://github.com/Open-Athena/pulumi/tree/patch-format
+[`v1`]: https://github.com/Open-Athena/pulumi/tree/v1
+
+---
+
 <p align="center">
     <a href="https://www.pulumi.com/?utm_source=github.com&utm_medium=referral&utm_campaign=pulumi-pulumi-github-repo&utm_content=top+logo" title="Pulumi - Modern Infrastructure as Code - AWS Azure Kubernetes Containers Serverless">
         <img src="https://www.pulumi.com/images/logo/logo-on-white-box.svg?" width="350">
