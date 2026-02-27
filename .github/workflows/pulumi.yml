@@ -100,12 +100,19 @@ jobs:
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Install dependencies
+        env:
+          DEPS_DIR: ${{ inputs.deps-directory || inputs.working-directory }}
+          WORK_DIR: ${{ inputs.working-directory }}
         working-directory: ${{ inputs.deps-directory || inputs.working-directory }}
         run: |
           if [ -f pyproject.toml ]; then
             uv pip install --system -e .
           elif [ -f requirements.txt ]; then
             uv pip install --system -r requirements.txt
+          fi
+          # Install project-specific deps if working-directory differs
+          if [ "$DEPS_DIR" != "$WORK_DIR" ] && [ -f "$GITHUB_WORKSPACE/$WORK_DIR/requirements.txt" ]; then
+            uv pip install --system -r "$GITHUB_WORKSPACE/$WORK_DIR/requirements.txt"
           fi
 
       - name: Cache Pulumi binary
