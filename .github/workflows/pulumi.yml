@@ -25,6 +25,10 @@ on:
         description: 'Directory containing pyproject.toml or requirements.txt (defaults to working-directory)'
         required: false
         type: string
+      deps-extras:
+        description: 'Comma-separated pyproject.toml extras to install (e.g. "gha,dev")'
+        required: false
+        type: string
       python-version:
         description: 'Python version to use'
         required: false
@@ -102,11 +106,16 @@ jobs:
       - name: Install dependencies
         env:
           DEPS_DIR: ${{ inputs.deps-directory || inputs.working-directory }}
+          DEPS_EXTRAS: ${{ inputs.deps-extras }}
           WORK_DIR: ${{ inputs.working-directory }}
         working-directory: ${{ inputs.deps-directory || inputs.working-directory }}
         run: |
           if [ -f pyproject.toml ]; then
-            uv pip install --system -e .
+            if [ -n "$DEPS_EXTRAS" ]; then
+              uv pip install --system -e ".[$DEPS_EXTRAS]"
+            else
+              uv pip install --system -e .
+            fi
           elif [ -f requirements.txt ]; then
             uv pip install --system -r requirements.txt
           fi
