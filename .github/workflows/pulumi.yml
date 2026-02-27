@@ -170,24 +170,13 @@ jobs:
               ;;
           esac
 
-      - name: Comment on PR
-        if: inputs.comment-on-pr && always()
+      - name: Summary and PR comment
+        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
         working-directory: ${{ inputs.working-directory }}
         run: |
-          # Find PR for this branch
-          PR_NUMBER=$(gh pr list --head "${{ github.ref_name }}" --json number --jq '.[0].number')
-          if [ -z "$PR_NUMBER" ]; then
-            echo "No PR found for branch ${{ github.ref_name }}"
-            exit 0
-          fi
-
-          # Get job ID and step number for deep link
-          JOB_JSON=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
-            --jq '.jobs[] | select(.name | contains("pulumi"))')
-          JOB_ID=$(echo "$JOB_JSON" | jq -r '.id')
-          STEP_NUM=$(echo "$JOB_JSON" | jq -r '.steps[] | select(.name | contains("Run Pulumi")) | .number')
+          [ -f pulumi-output.txt ] || exit 0
 
           STATUS="${{ steps.pulumi.outcome }}"
           if [ "$STATUS" = "success" ]; then
@@ -196,18 +185,14 @@ jobs:
             ICON="❌"
           fi
 
-          SHORT_SHA="${{ github.sha }}"
-          SHORT_SHA="${SHORT_SHA:0:7}"
-
-          JOB_LINK="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/job/${JOB_ID}#step:${STEP_NUM}:1"
-          COMMIT_LINK="${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}"
+          PREFIX="${{ inputs.project && format('{0}: ', inputs.project) || '' }}"
 
           # Dynamic fence length: one longer than any backtick run in content (min 3)
           MAX=$(grep -oE '\`+' pulumi-output.txt | awk '{print length}' | sort -rn | head -1)
           FENCE=$(printf '`%.0s' $(seq 1 $(( ${MAX:-0} > 2 ? MAX + 1 : 3 ))))
 
-          {
-            echo "## ${ICON} ${{ inputs.project && format('{0}: ', inputs.project) || '' }}pulumi ${{ inputs.cmd }} ([${SHORT_SHA}](${COMMIT_LINK}))"
+          # Build shared output body
+          output_body() {
             echo ""
             echo "<details>"
             echo "<summary>Output</summary>"
@@ -217,6 +202,38 @@ jobs:
             echo "$FENCE"
             echo ""
             echo "</details>"
+          }
+
+          # Job summary
+          {
+            echo "## ${ICON} ${PREFIX}pulumi ${{ inputs.cmd }}"
+            output_body
+          } >> $GITHUB_STEP_SUMMARY
+
+          # PR comment (with commit link and workflow logs)
+          if [ "${{ inputs.comment-on-pr }}" != "true" ]; then
+            exit 0
+          fi
+
+          PR_NUMBER=$(gh pr list --head "${{ github.ref_name }}" --json number --jq '.[0].number')
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No PR found for branch ${{ github.ref_name }}"
+            exit 0
+          fi
+
+          JOB_JSON=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
+            --jq '.jobs[] | select(.name | contains("pulumi"))')
+          JOB_ID=$(echo "$JOB_JSON" | jq -r '.id')
+          STEP_NUM=$(echo "$JOB_JSON" | jq -r '.steps[] | select(.name | contains("Run Pulumi")) | .number')
+
+          SHORT_SHA="${{ github.sha }}"
+          SHORT_SHA="${SHORT_SHA:0:7}"
+          JOB_LINK="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/job/${JOB_ID}#step:${STEP_NUM}:1"
+          COMMIT_LINK="${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}"
+
+          {
+            echo "## ${ICON} ${PREFIX}pulumi ${{ inputs.cmd }} ([${SHORT_SHA}](${COMMIT_LINK}))"
+            output_body
             echo ""
             echo "[Workflow logs](${JOB_LINK})"
           } > comment-body.md
