@@ -5,7 +5,7 @@ on:
   workflow_call:
     inputs:
       cmd:
-        description: 'Pulumi command (preview, up, refresh)'
+        description: 'Pulumi command (preview, up, refresh, destroy, init, stack-rm)'
         required: true
         type: string
       stack:
@@ -53,9 +53,16 @@ on:
         required: false
         default: 'a2b415984ed69668323572cc4df274992932c304'
         type: string
+      secrets-provider:
+        description: 'Secrets provider for stack init (e.g. "gcpkms://projects/.../cryptoKeys/...")'
+        required: false
+        type: string
     secrets:
       PULUMI_ACCESS_TOKEN:
         description: 'Pulumi Cloud access token (if using Pulumi Cloud backend)'
+        required: false
+      PULUMI_CONFIG_PASSPHRASE:
+        description: 'Passphrase for stack encryption (leave unset for empty passphrase on self-managed backends)'
         required: false
 
 # Pulumi fork with --patch flag for GitHub-compatible diff output
@@ -162,8 +169,22 @@ jobs:
       - name: Run Pulumi ${{ inputs.cmd }}
         id: pulumi
         working-directory: ${{ inputs.working-directory }}
+        env:
+          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
         run: |
           set -o pipefail
+
+          case "${{ inputs.cmd }}" in
+            init)
+              pulumi stack init ${{ inputs.stack }} \
+                ${{ inputs.secrets-provider && format('--secrets-provider="{0}"', inputs.secrets-provider) || '' }}
+              exit 0
+              ;;
+            stack-rm)
+              pulumi stack rm ${{ inputs.stack }} --yes --force
+              exit 0
+              ;;
+          esac
 
           pulumi stack select ${{ inputs.stack }}
 
@@ -179,6 +200,9 @@ jobs:
               ;;
             refresh)
               pulumi refresh --yes --non-interactive 2>&1 | tee pulumi-output.txt
+              ;;
+            destroy)
+              pulumi destroy --yes --non-interactive 2>&1 | tee pulumi-output.txt
               ;;
             *)
               echo "::error::Unknown command: ${{ inputs.cmd }}"
@@ -204,7 +228,7 @@ jobs:
           PREFIX="${{ inputs.project && format('{0}: ', inputs.project) || '' }}"
 
           # Dynamic fence length: one longer than any backtick run in content (min 3)
-          MAX=$(grep -oE '\`+' pulumi-output.txt | awk '{print length}' | sort -rn | head -1)
+          MAX=$(grep -oE '[`]+' pulumi-output.txt | awk '{print length}' | sort -rn | head -1)
           FENCE=$(printf '`%.0s' $(seq 1 $(( ${MAX:-0} > 2 ? MAX + 1 : 3 ))))
 
           # Build shared output body
@@ -259,6 +283,8 @@ jobs:
       - name: Export outputs
         if: inputs.cmd == 'up'
         working-directory: ${{ inputs.working-directory }}
+        env:
+          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
         run: |
           echo "### Pulumi Stack Outputs" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
