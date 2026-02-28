@@ -61,6 +61,9 @@ on:
       PULUMI_ACCESS_TOKEN:
         description: 'Pulumi Cloud access token (if using Pulumi Cloud backend)'
         required: false
+      PULUMI_CONFIG_PASSPHRASE:
+        description: 'Passphrase for stack encryption (leave unset for empty passphrase on self-managed backends)'
+        required: false
 
 # Pulumi fork with --patch flag for GitHub-compatible diff output
 # https://github.com/Open-Athena/pulumi/commits/patch
@@ -166,6 +169,8 @@ jobs:
       - name: Run Pulumi ${{ inputs.cmd }}
         id: pulumi
         working-directory: ${{ inputs.working-directory }}
+        env:
+          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
         run: |
           set -o pipefail
 
@@ -278,6 +283,8 @@ jobs:
       - name: Export outputs
         if: inputs.cmd == 'up'
         working-directory: ${{ inputs.working-directory }}
+        env:
+          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
         run: |
           echo "### Pulumi Stack Outputs" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
