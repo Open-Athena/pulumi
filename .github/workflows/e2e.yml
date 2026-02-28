@@ -1,0 +1,92 @@
+name: E2E Test
+run-name: 'e2e: test-${{ github.run_id }}'
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+  actions: read
+
+jobs:
+  init:
+    uses: ./.github/workflows/pulumi.yml
+    with:
+      cmd: init
+      stack: test-${{ github.run_id }}
+      project: e2e
+      working-directory: test
+      comment-on-pr: false
+      secrets-provider: ${{ vars.GCP_KMS_KEY }}
+    secrets: inherit
+
+  preview-create:
+    needs: init
+    uses: ./.github/workflows/pulumi.yml
+    with:
+      cmd: preview
+      stack: test-${{ github.run_id }}
+      project: e2e
+      working-directory: test
+      comment-on-pr: false
+    secrets: inherit
+
+  up:
+    needs: preview-create
+    uses: ./.github/workflows/pulumi.yml
+    with:
+      cmd: up
+      stack: test-${{ github.run_id }}
+      project: e2e
+      working-directory: test
+      comment-on-pr: false
+    secrets: inherit
+
+  preview-nop:
+    needs: up
+    uses: ./.github/workflows/pulumi.yml
+    with:
+      cmd: preview
+      stack: test-${{ github.run_id }}
+      project: e2e
+      working-directory: test
+      comment-on-pr: false
+    secrets: inherit
+
+  destroy:
+    needs: [up, preview-nop]
+    if: always() && needs.up.result == 'success'
+    uses: ./.github/workflows/pulumi.yml
+    with:
+      cmd: destroy
+      stack: test-${{ github.run_id }}
+      project: e2e
+      working-directory: test
+      comment-on-pr: false
+    secrets: inherit
+
+  preview-recreate:
+    needs: destroy
+    if: always() && needs.destroy.result == 'success'
+    uses: ./.github/workflows/pulumi.yml
+    with:
+      cmd: preview
+      stack: test-${{ github.run_id }}
+      project: e2e
+      working-directory: test
+      comment-on-pr: false
+    secrets: inherit
+
+  stack-rm:
+    needs: [destroy, preview-recreate]
+    if: always() && needs.destroy.result == 'success'
+    uses: ./.github/workflows/pulumi.yml
+    with:
+      cmd: stack-rm
+      stack: test-${{ github.run_id }}
+      project: e2e
+      working-directory: test
+      comment-on-pr: false
+    secrets: inherit
