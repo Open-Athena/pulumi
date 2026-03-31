@@ -57,6 +57,11 @@ on:
         description: 'Secrets provider for stack init (e.g. "gcpkms://projects/.../cryptoKeys/...")'
         required: false
         type: string
+      live-branch:
+        description: 'Branch tracking last successful `up`. Enforces monotonic ancestry and advances pointer on success.'
+        required: false
+        default: ''
+        type: string
     secrets:
       PULUMI_ACCESS_TOKEN:
         description: 'Pulumi Cloud access token (if using Pulumi Cloud backend)'
@@ -76,12 +81,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
-      contents: read
+      contents: write
       pull-requests: write
       actions: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ inputs.live-branch && '0' || '1' }}
 
       # GCP auth for Pulumi backend (gs://...) - only if vars are set
       - name: Authenticate to Google Cloud
@@ -164,6 +171,19 @@ jobs:
         run: |
           if [ -n "$PULUMI_ACCESS_TOKEN" ]; then
             echo "PULUMI_ACCESS_TOKEN=$PULUMI_ACCESS_TOKEN" >> $GITHUB_ENV
+          fi
+
+      - name: Verify ancestry from live-branch
+        if: inputs.cmd == 'up' && inputs.live-branch != ''
+        run: |
+          git fetch origin "${{ inputs.live-branch }}" || {
+            echo "::notice::live-branch '${{ inputs.live-branch }}' does not exist yet, skipping ancestry check"
+            exit 0
+          }
+          LIVE_SHA=$(git rev-parse "origin/${{ inputs.live-branch }}")
+          if ! git merge-base --is-ancestor "$LIVE_SHA" HEAD; then
+            echo "::error::Cannot up: HEAD is not a descendant of ${{ inputs.live-branch }} ($LIVE_SHA). Rebase first."
+            exit 1
           fi
 
       - name: Run Pulumi ${{ inputs.cmd }}
@@ -279,6 +299,10 @@ jobs:
           } > comment-body.md
 
           gh pr comment "$PR_NUMBER" --body-file comment-body.md
+
+      - name: Advance live-branch pointer
+        if: inputs.cmd == 'up' && inputs.live-branch != '' && steps.pulumi.outcome == 'success'
+        run: git push origin "HEAD:refs/heads/${{ inputs.live-branch }}"
 
       - name: Export outputs
         if: inputs.cmd == 'up'
