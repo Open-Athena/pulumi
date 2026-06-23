@@ -84,12 +84,41 @@ jobs:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
 
-      # AWS auth - use input, then var, then skip
-      - name: Configure AWS Credentials
+      # AWS auth — resolve role ARN from (in priority order):
+      # 1. `inputs.aws-role` (per-call override)
+      # 2. `vars.PULUMI_AWS_ROLE` as a JSON object keyed by `inputs.project`
+      #    (e.g. `{"oa-ci": "arn:...", "oa-management": "arn:..."}`). Missing
+      #    keys raise (no silent fallback into a wrong AWS account).
+      # 3. `vars.PULUMI_AWS_ROLE` as a raw ARN string (back-compat /
+      #    single-account consumers).
+      # If both 1 and 2/3 are empty, the auth step is skipped entirely.
+      - name: Resolve AWS role
+        id: aws-role
         if: inputs.aws-role != '' || vars.PULUMI_AWS_ROLE != ''
+        env:
+          INPUT_ROLE: ${{ inputs.aws-role }}
+          VAR_ROLE: ${{ vars.PULUMI_AWS_ROLE }}
+          PROJECT: ${{ inputs.project }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_ROLE" ]; then
+            role="$INPUT_ROLE"
+          elif [[ "$VAR_ROLE" == \{* ]]; then
+            role=$(jq -re --arg key "$PROJECT" '
+              if has($key) then .[$key]
+              else error("vars.PULUMI_AWS_ROLE is a JSON map but has no key for project: \"" + $key + "\"")
+              end
+            ' <<<"$VAR_ROLE")
+          else
+            role="$VAR_ROLE"
+          fi
+          echo "role=$role" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS Credentials
+        if: steps.aws-role.outputs.role != ''
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ inputs.aws-role || vars.PULUMI_AWS_ROLE }}
+          role-to-assume: ${{ steps.aws-role.outputs.role }}
           role-session-name: pulumi-github-actions
           aws-region: ${{ inputs.aws-region }}
 
