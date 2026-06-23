@@ -121,11 +121,13 @@ jobs:
           else
             role="$VAR_ROLE"
           fi
-          # Heredoc form avoids any chance of output-injection via newlines in $role.
+          # Heredoc form (with a random delimiter per GitHub's official guidance for
+          # multiline outputs) avoids any chance of output-injection via newlines in $role.
+          delim="EOF_$(openssl rand -hex 8)"
           {
-            echo "role<<EOF"
-            echo "$role"
-            echo "EOF"
+            printf '%s<<%s\n' "role" "$delim"
+            printf '%s\n' "$role"
+            printf '%s\n' "$delim"
           } >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS Credentials
