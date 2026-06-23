@@ -103,16 +103,30 @@ jobs:
           set -euo pipefail
           if [ -n "$INPUT_ROLE" ]; then
             role="$INPUT_ROLE"
-          elif [[ "$VAR_ROLE" == \{* ]]; then
+          elif [[ "$VAR_ROLE" =~ ^[[:space:]]*\{ ]]; then
+            # JSON map: require `inputs.project`, look it up, and validate the
+            # selected value is a non-empty string.
+            if [ -z "$PROJECT" ]; then
+              echo "::error::vars.PULUMI_AWS_ROLE is a JSON map; the calling workflow must pass a non-empty 'project' input" >&2
+              exit 1
+            fi
             role=$(jq -re --arg key "$PROJECT" '
-              if has($key) then .[$key]
-              else error("vars.PULUMI_AWS_ROLE is a JSON map but has no key for project: \"" + $key + "\"")
+              if (has($key) | not) then
+                error("vars.PULUMI_AWS_ROLE is a JSON map but has no key for project: \"" + $key + "\"")
+              elif (.[$key] | type) != "string" or (.[$key] | length) == 0 then
+                error("vars.PULUMI_AWS_ROLE[\"" + $key + "\"] is not a non-empty string")
+              else .[$key]
               end
             ' <<<"$VAR_ROLE")
           else
             role="$VAR_ROLE"
           fi
-          echo "role=$role" >> "$GITHUB_OUTPUT"
+          # Heredoc form avoids any chance of output-injection via newlines in $role.
+          {
+            echo "role<<EOF"
+            echo "$role"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS Credentials
         if: steps.aws-role.outputs.role != ''
