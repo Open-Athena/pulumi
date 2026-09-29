@@ -184,30 +184,37 @@ jobs:
       - name: Run Pulumi ${{ inputs.cmd }}
         id: pulumi
         working-directory: ${{ inputs.working-directory }}
+        # Inputs are passed via `env`, never `${{ }}`-interpolated into the script, so that
+        # shell syntax in them (e.g. `$(...)`) can't execute.
         env:
           PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+          CMD: ${{ inputs.cmd }}
+          STACK: ${{ inputs.stack }}
+          SECRETS_PROVIDER: ${{ inputs.secrets-provider }}
         run: |
           set -o pipefail
 
-          case "${{ inputs.cmd }}" in
+          case "$CMD" in
             init)
-              pulumi stack init ${{ inputs.stack }} \
-                ${{ inputs.secrets-provider && format('--secrets-provider="{0}"', inputs.secrets-provider) || '' }} \
-                2>&1 | tee pulumi-output.txt
+              args=()
+              if [ -n "$SECRETS_PROVIDER" ]; then
+                args+=(--secrets-provider="$SECRETS_PROVIDER")
+              fi
+              pulumi stack init "$STACK" "${args[@]}" 2>&1 | tee pulumi-output.txt
               exit 0
               ;;
             stack-rm)
-              pulumi stack rm ${{ inputs.stack }} --yes --force 2>&1 | tee pulumi-output.txt
+              pulumi stack rm "$STACK" --yes --force 2>&1 | tee pulumi-output.txt
               exit 0
               ;;
           esac
 
-          pulumi stack select ${{ inputs.stack }}
+          pulumi stack select "$STACK"
 
           # Remove profile if set (use env vars instead)
           pulumi config rm aws:profile 2>/dev/null || true
 
-          case "${{ inputs.cmd }}" in
+          case "$CMD" in
             preview)
               pulumi preview --patch --non-interactive 2>&1 | tee pulumi-output.txt
               ;;
@@ -221,7 +228,7 @@ jobs:
               pulumi destroy --yes --non-interactive 2>&1 | tee pulumi-output.txt
               ;;
             *)
-              echo "::error::Unknown command: ${{ inputs.cmd }}"
+              echo "::error::Unknown command: $CMD"
               exit 1
               ;;
           esac
@@ -230,18 +237,25 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
+          STATUS: ${{ steps.pulumi.outcome }}
+          CMD: ${{ inputs.cmd }}
+          PROJECT: ${{ inputs.project }}
+          COMMENT_ON_PR: ${{ inputs.comment-on-pr }}
+          REF_NAME: ${{ github.ref_name }}
         working-directory: ${{ inputs.working-directory }}
         run: |
           [ -f pulumi-output.txt ] || exit 0
 
-          STATUS="${{ steps.pulumi.outcome }}"
           if [ "$STATUS" = "success" ]; then
             ICON="✅"
           else
             ICON="❌"
           fi
 
-          PREFIX="${{ inputs.project && format('{0}: ', inputs.project) || '' }}"
+          PREFIX=""
+          if [ -n "$PROJECT" ]; then
+            PREFIX="$PROJECT: "
+          fi
 
           # Dynamic fence length: one longer than any backtick run in content (min 3)
           MAX=$(grep -oE '[`]+' pulumi-output.txt | awk '{print length}' | sort -rn | head -1)
@@ -262,18 +276,18 @@ jobs:
 
           # Job summary
           {
-            echo "## ${ICON} ${PREFIX}pulumi ${{ inputs.cmd }}"
+            echo "## ${ICON} ${PREFIX}pulumi ${CMD}"
             output_body
           } >> $GITHUB_STEP_SUMMARY
 
           # PR comment (with commit link and workflow logs)
-          if [ "${{ inputs.comment-on-pr }}" != "true" ]; then
+          if [ "$COMMENT_ON_PR" != "true" ]; then
             exit 0
           fi
 
-          PR_NUMBER=$(gh pr list --head "${{ github.ref_name }}" --json number --jq '.[0].number')
+          PR_NUMBER=$(gh pr list --head "$REF_NAME" --json number --jq '.[0].number')
           if [ -z "$PR_NUMBER" ]; then
-            echo "No PR found for branch ${{ github.ref_name }}"
+            echo "No PR found for branch $REF_NAME"
             exit 0
           fi
 
@@ -288,7 +302,7 @@ jobs:
           COMMIT_LINK="${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}"
 
           {
-            echo "## ${ICON} ${PREFIX}pulumi ${{ inputs.cmd }} ([${SHORT_SHA}](${COMMIT_LINK}))"
+            echo "## ${ICON} ${PREFIX}pulumi ${CMD} ([${SHORT_SHA}](${COMMIT_LINK}))"
             output_body
             echo ""
             echo "[Workflow logs](${JOB_LINK})"
