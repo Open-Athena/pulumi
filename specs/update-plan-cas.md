@@ -6,7 +6,7 @@ When we dispatch `pulumi up` from a PR to mutate real infrastructure, we current
 
 Concrete trigger: Open-Athena/ops#66 A/B-tests dropping `sts:GetServiceBearerToken` from an IAM policy. The reviewer wants to see the preview diff, then have `up` apply *exactly that diff and nothing more*. Two-step `preview` → read → `up` is a mitigation but not a guarantee.
 
-Pulumi's engine supports this natively via **update plans** (`--save-plan` / `--plan`), gated behind `PULUMI_EXPERIMENTAL=true`. This spec wires that through the reusable workflow.
+Pulumi's engine supports this natively via **update plans** (`preview --save-plan` / `up --plan`). Both flags are marked experimental, but upstream only *hides* them when `PULUMI_EXPERIMENTAL` is unset; they work without it (verified on v3.265.0 + our `--patch` commits). Setting `PULUMI_EXPERIMENTAL=true` would also enable unrelated experimental engine behavior, so we don't. This spec wires update plans through the reusable workflow.
 
 ## Goal
 
@@ -25,7 +25,7 @@ In the `preview` branch of the case in `Run Pulumi`:
 
 ```bash
 preview)
-  PULUMI_EXPERIMENTAL=true pulumi preview --patch --non-interactive \
+  pulumi preview --patch --non-interactive \
     --save-plan=plan.json 2>&1 | tee pulumi-output.txt
   ;;
 ```
@@ -34,13 +34,19 @@ After the step, upload `plan.json` as an artifact:
 
 ```yaml
 - name: Upload plan artifact
+  id: plan-artifact
   if: inputs.cmd == 'preview' && steps.pulumi.outcome == 'success'
   uses: actions/upload-artifact@v4
   with:
     name: pulumi-plan-${{ inputs.project || 'default' }}-${{ inputs.stack }}
     path: ${{ inputs.working-directory }}/plan.json
     retention-days: 30
+    overwrite: true
 ```
+
+**`overwrite: true` is required:** one workflow run can preview the same project+stack more than once (`e2e.yml` does, three times), and `upload-artifact@v4` fails on a duplicate name within a run. The name can't be disambiguated per call, since in a reusable workflow `github.job` is always the callee's job id (`pulumi`). Instead, the marker (below) records the upload's `artifact-id` output, and `up` downloads by id. An overwritten artifact's old id is deleted, so a CAS-`up` against a superseded preview fails loudly.
+
+**Secrets:** the plan file encrypts secret values with the stack's secrets provider (verified: `SerializePlan` takes an `Encrypter`, and plans contain no plaintext secrets). Non-secret inputs are plaintext, a similar exposure to the preview comment itself. Never combine `--save-plan` with `--show-secrets`, which writes secrets in plaintext.
 
 **Why save every preview:** artifacts are cheap (plans are KB–low-MB JSON), and the alternative (opt-in) means you can't retroactively decide to CAS-up a preview you already ran. One extra step in preview, no semantic change to output.
 
@@ -49,10 +55,10 @@ After the step, upload `plan.json` as an artifact:
 In the "Summary and PR comment" step, when `cmd=preview`, append a machine-readable HTML comment identifying the artifact:
 
 ```html
-<!-- pulumi-plan: run_id=<GITHUB_RUN_ID> sha=<GITHUB_SHA> project=<project> stack=<stack> pulumi_sha=<PULUMI_FORK_SHA> -->
+<!-- pulumi-plan: run_id=<GITHUB_RUN_ID> artifact_id=<steps.plan-artifact.outputs.artifact-id> sha=<GITHUB_SHA> project=<project> stack=<stack> pulumi_sha=<PULUMI_FORK_SHA> -->
 ```
 
-Rendered comments never show this. `up` uses it to resolve `plan-source: pr:<N>` to a specific run.
+Rendered comments never show this. `up` uses it to *locate* a plan (resolve `plan-source: pr:<N>` to a run and artifact). It is not trusted for validation; see step 3.
 
 ### 3. Up consumes the plan
 
@@ -78,11 +84,11 @@ plan-source-force:
 Resolution logic (new step before `Run Pulumi`, when `cmd=up` and `plan-source` non-empty):
 
 1. Parse `plan-source`:
-   - Numeric → treat as `run_id`
-   - `pr:<N>` → `gh api repos/{owner}/{repo}/issues/<N>/comments` → for each comment posted by this workflow (identify via the `<!-- pulumi-plan: … -->` marker), filter to matching `project` + `stack`, pick the most recent, extract `run_id`
-   - `comment:<id>` → fetch that comment, extract marker
-2. Validate: current `github.sha` matches the marker's `sha` (unless `plan-source-force`). Same for `pulumi_sha`.
-3. `gh run download <run_id> --name pulumi-plan-<project>-<stack> --dir "${{ inputs.working-directory }}"` → gets `plan.json`.
+   - Numeric → treat as `run_id`; find its plan artifact via `gh api repos/{owner}/{repo}/actions/runs/<run_id>/artifacts`, by name `pulumi-plan-<project>-<stack>`
+   - `pr:<N>` → `gh api repos/{owner}/{repo}/issues/<N>/comments` → keep only comments by `github-actions[bot]` that carry a `<!-- pulumi-plan: … -->` marker, filter to matching `project` + `stack`, pick the most recent, extract `run_id` + `artifact_id`. The author filter matters on public repos, where anyone can post a comment containing a forged marker.
+   - `comment:<id>` → fetch that comment (same author check), extract marker
+2. Validate against GitHub's records, not the marker: `gh api repos/{owner}/{repo}/actions/runs/<run_id>` → require `head_sha == github.sha` and that the run is this repo's Pulumi workflow (unless `plan-source-force`). Compare the marker's `pulumi_sha` to `PULUMI_FORK_SHA` (also skippable via `plan-source-force`). The `github.sha` comparison is meaningful because callers dispatch `pulumi.yml` via `workflow_dispatch` (e.g. ops), so preview and `up` both run on the branch head. A `pull_request`-triggered preview would run on the merge commit and never match.
+3. Download by id: `gh api repos/{owner}/{repo}/actions/artifacts/<artifact_id>/zip > plan.zip && unzip plan.zip -d "${{ inputs.working-directory }}"` → gets `plan.json`. Needs `actions: read`, which the workflow already requests.
 
 In the `up` branch:
 
@@ -91,13 +97,14 @@ up)
   PLAN_FLAG=""
   if [ -f plan.json ]; then
     PLAN_FLAG="--plan=plan.json"
-    export PULUMI_EXPERIMENTAL=true
   fi
   pulumi up --yes --non-interactive $PLAN_FLAG 2>&1 | tee pulumi-output.txt
   ;;
 ```
 
-If the engine's re-computed plan diverges from `plan.json`, it exits non-zero with a diff — that's the CAS failure, and it surfaces in the PR comment via the existing "Summary and PR comment" step. Good default; no extra plumbing needed.
+If the engine's re-computed plan diverges from `plan.json`, it exits non-zero naming the violating resource, e.g. `violates plan: properties changed: ~~length[{12}!={16}]`. That's the CAS failure, and it surfaces in the PR comment via the existing "Summary and PR comment" step. No extra plumbing needed.
+
+**Never add `--skip-preview` alongside `--plan`.** `up --plan` runs its own preview phase first, and that is where plan violations are caught. In a local test, a drifted `up --plan` failed during that phase with nothing applied, not even the valid, planned replacement of another resource (stack history showed no update). With `--skip-preview`, violations are detected only as steps execute, which can leave a partial apply. Drift that only shows at apply time (e.g. a provider returning different values than it predicted) can still fail mid-apply; that is inherent to the engine.
 
 ## Open questions
 
@@ -110,7 +117,8 @@ If the engine's re-computed plan diverges from `plan.json`, it exits non-zero wi
 
 ## Testing plan
 
-1. In a scratch stack:
+0. Done locally (rebased fork binary, file backend, YAML program with `random` resources): `preview --save-plan` → change a resource input → `up --plan` fails with `violates plan`, nothing applied → revert the change → `up --plan` succeeds.
+1. In `e2e.yml` (which already previews one stack three times per run, exercising `overwrite: true`):
    - Dispatch `cmd=preview` → verify `plan.json` artifact appears, marker embedded in comment.
    - Dispatch `cmd=up plan-source=<that run id>` → verify plan is downloaded and applied.
    - Make a config change to that stack out-of-band (in another PR, or console).
@@ -122,7 +130,7 @@ If the engine's re-computed plan diverges from `plan.json`, it exits non-zero wi
 ## BC
 
 - Default behavior unchanged: no `plan-source` → `up` runs as today (no `--plan`, no `PULUMI_EXPERIMENTAL`).
-- `preview` gains a `--save-plan` invocation and an artifact upload. If `PULUMI_EXPERIMENTAL` gating causes any unexpected output-format change, we roll back that half separately.
+- `preview` gains a `--save-plan` invocation and an artifact upload. With `PULUMI_EXPERIMENTAL` left unset, preview output is unchanged apart from two trailing lines: "Update plan written to 'plan.json'" and a hint to run `pulumi up --plan`.
 
 ## Rollout
 
