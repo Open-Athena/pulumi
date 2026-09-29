@@ -1,0 +1,5 @@
+name: pulumi-v1-test
+description: Test stack for the pulumi-v1 reusable workflow
+runtime: python
+backend:
+  url: gs://oa-pulumi
