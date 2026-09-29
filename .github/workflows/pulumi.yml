@@ -66,9 +66,11 @@ on:
         required: false
 
 # Pulumi fork with --patch flag for GitHub-compatible diff output
-# https://github.com/Open-Athena/pulumi/commits/patch
+# https://github.com/Open-Athena/pulumi/commits/patch-format
 env:
   PULUMI_FORK_SHA: ${{ inputs.pulumi-sha }}
+  # Fork builds report version 0.0.0, so the update check always warns
+  PULUMI_SKIP_UPDATE_CHECK: 'true'
 
 jobs:
   pulumi:
@@ -131,28 +133,38 @@ jobs:
             uv pip install --system -r "$GITHUB_WORKSPACE/$WORK_DIR/requirements.txt"
           fi
 
-      - name: Cache Pulumi binary
+      # The Python language host is built too: otherwise the runner image's preinstalled
+      # (different-version) `pulumi-language-python` is picked up from $PATH.
+      - name: Cache Pulumi binaries
         id: cache-pulumi
         uses: actions/cache@v4
         with:
-          path: ~/.pulumi/bin/pulumi
-          key: pulumi-${{ runner.os }}-${{ env.PULUMI_FORK_SHA }}
+          path: |
+            ~/.pulumi/bin/pulumi
+            ~/.pulumi/bin/pulumi-language-python
+          key: pulumi-bins-${{ runner.os }}-${{ env.PULUMI_FORK_SHA }}
 
-      - name: Setup Go (for building Pulumi)
-        if: steps.cache-pulumi.outputs.cache-hit != 'true'
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
-
-      - name: Build Pulumi from fork
+      - name: Fetch Pulumi fork source
         if: steps.cache-pulumi.outputs.cache-hit != 'true'
         run: |
           git init pulumi-src
           cd pulumi-src
           git fetch --depth 1 https://github.com/Open-Athena/pulumi.git "$PULUMI_FORK_SHA"
           git checkout "$PULUMI_FORK_SHA"
-          cd pkg
-          go build -o $HOME/.pulumi/bin/pulumi ./cmd/pulumi
+
+      - name: Setup Go (for building Pulumi)
+        if: steps.cache-pulumi.outputs.cache-hit != 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: pulumi-src/pkg/go.mod
+          cache: false
+
+      - name: Build Pulumi from fork
+        if: steps.cache-pulumi.outputs.cache-hit != 'true'
+        working-directory: pulumi-src
+        run: |
+          (cd pkg && go build -o $HOME/.pulumi/bin/pulumi ./cmd/pulumi)
+          (cd sdk/python/cmd/pulumi-language-python && go build -o $HOME/.pulumi/bin/pulumi-language-python .)
 
       - name: Add Pulumi to PATH
         run: echo "$HOME/.pulumi/bin" >> $GITHUB_PATH
