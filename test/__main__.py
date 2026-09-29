@@ -7,7 +7,6 @@ import pulumi
 import pulumi_aws as aws
 import pulumi_tls as tls
 
-config = pulumi.Config()
 env = pulumi.get_stack()
 
 # EC2 Key Pair (via TLS-generated key)
@@ -17,7 +16,7 @@ key_pair = aws.ec2.KeyPair("test-key-pair",
     public_key=key.public_key_openssh,
 )
 
-# IAM Role (no trust policy; just exists for diff testing)
+# IAM Role (deny-all trust policy; just exists for diff testing)
 role = aws.iam.Role("test-role",
     name=f"pulumi-v1-test-{env}",
     assume_role_policy="""{

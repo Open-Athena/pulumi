@@ -177,11 +177,12 @@ jobs:
           case "${{ inputs.cmd }}" in
             init)
               pulumi stack init ${{ inputs.stack }} \
-                ${{ inputs.secrets-provider && format('--secrets-provider="{0}"', inputs.secrets-provider) || '' }}
+                ${{ inputs.secrets-provider && format('--secrets-provider="{0}"', inputs.secrets-provider) || '' }} \
+                2>&1 | tee pulumi-output.txt
               exit 0
               ;;
             stack-rm)
-              pulumi stack rm ${{ inputs.stack }} --yes --force
+              pulumi stack rm ${{ inputs.stack }} --yes --force 2>&1 | tee pulumi-output.txt
               exit 0
               ;;
           esac
