@@ -142,7 +142,9 @@ jobs:
           path: |
             ~/.pulumi/bin/pulumi
             ~/.pulumi/bin/pulumi-language-python
-          key: pulumi-bins-${{ runner.os }}-${{ env.PULUMI_FORK_SHA }}
+            ~/.pulumi/bin/pulumi-language-python-exec
+            ~/.pulumi/bin/pulumi-resource-pulumi-python
+          key: pulumi-bins-v2-${{ runner.os }}-${{ env.PULUMI_FORK_SHA }}
 
       - name: Fetch Pulumi fork source
         if: steps.cache-pulumi.outputs.cache-hit != 'true'
@@ -165,6 +167,7 @@ jobs:
         run: |
           (cd pkg && go build -o $HOME/.pulumi/bin/pulumi ./cmd/pulumi)
           (cd sdk/python/cmd/pulumi-language-python && go build -o $HOME/.pulumi/bin/pulumi-language-python .)
+          install -m 755 sdk/python/cmd/pulumi-language-python-exec sdk/python/dist/pulumi-resource-pulumi-python $HOME/.pulumi/bin/
 
       - name: Add Pulumi to PATH
         run: echo "$HOME/.pulumi/bin" >> $GITHUB_PATH
