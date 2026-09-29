@@ -53,11 +53,13 @@ jobs:
       project: e2e
       working-directory: test
       comment-on-pr: false
+      expect-no-changes: true
     secrets: inherit
 
+  # Clean up whenever `init` succeeded, even if intermediate jobs failed or were skipped
   destroy:
-    needs: [up, preview-nop]
-    if: always() && needs.up.result == 'success'
+    needs: [init, preview-create, up, preview-nop]
+    if: always() && needs.init.result == 'success'
     uses: ./.github/workflows/pulumi.yml
     with:
       cmd: destroy
@@ -68,8 +70,8 @@ jobs:
     secrets: inherit
 
   preview-recreate:
-    needs: destroy
-    if: always() && needs.destroy.result == 'success'
+    needs: [up, destroy]
+    if: always() && needs.up.result == 'success' && needs.destroy.result == 'success'
     uses: ./.github/workflows/pulumi.yml
     with:
       cmd: preview

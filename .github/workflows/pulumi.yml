@@ -57,6 +57,11 @@ on:
         description: 'Secrets provider for stack init (e.g. "gcpkms://projects/.../cryptoKeys/...")'
         required: false
         type: string
+      expect-no-changes:
+        description: 'For `preview`: fail if any changes are proposed (passes `--expect-no-changes`)'
+        required: false
+        default: false
+        type: boolean
     secrets:
       PULUMI_ACCESS_TOKEN:
         description: 'Pulumi Cloud access token (if using Pulumi Cloud backend)'
@@ -191,6 +196,7 @@ jobs:
           CMD: ${{ inputs.cmd }}
           STACK: ${{ inputs.stack }}
           SECRETS_PROVIDER: ${{ inputs.secrets-provider }}
+          EXPECT_NO_CHANGES: ${{ inputs.expect-no-changes }}
         run: |
           set -o pipefail
 
@@ -216,7 +222,11 @@ jobs:
 
           case "$CMD" in
             preview)
-              pulumi preview --patch --non-interactive 2>&1 | tee pulumi-output.txt
+              args=()
+              if [ "$EXPECT_NO_CHANGES" = "true" ]; then
+                args+=(--expect-no-changes)
+              fi
+              pulumi preview --patch --non-interactive "${args[@]}" 2>&1 | tee pulumi-output.txt
               ;;
             up)
               pulumi up --yes --non-interactive 2>&1 | tee pulumi-output.txt
