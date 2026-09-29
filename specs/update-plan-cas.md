@@ -30,19 +30,38 @@ preview)
   ;;
 ```
 
-After the step, upload `plan.json` as an artifact:
+After the step, write trusted metadata next to the plan, and upload both as one artifact:
 
 ```yaml
+- name: Prepare plan artifact
+  id: plan-meta
+  if: inputs.cmd == 'preview' && steps.pulumi.outcome == 'success'
+  working-directory: ${{ inputs.working-directory }}
+  env:
+    PROJECT: ${{ inputs.project }}
+    STACK: ${{ inputs.stack }}
+  run: |
+    jq -n --arg project "$PROJECT" --arg stack "$STACK" \
+      --arg sha "$GITHUB_SHA" --arg pulumi_sha "$PULUMI_FORK_SHA" \
+      '{project: $project, stack: $stack, sha: $sha, pulumi_sha: $pulumi_sha}' > plan-meta.json
+    # Stacks may be fully qualified (`org/project/stack`), and artifact names can't contain `/`
+    key=$(printf '%s' "${PROJECT:-default}--$STACK" | sed 's/[^A-Za-z0-9._-]/_/g')
+    echo "name=pulumi-plan-$key" >> "$GITHUB_OUTPUT"
+
 - name: Upload plan artifact
   id: plan-artifact
-  if: inputs.cmd == 'preview' && steps.pulumi.outcome == 'success'
+  if: steps.plan-meta.outcome == 'success'
   uses: actions/upload-artifact@v4
   with:
-    name: pulumi-plan-${{ inputs.project || 'default' }}-${{ inputs.stack }}
-    path: ${{ inputs.working-directory }}/plan.json
+    name: ${{ steps.plan-meta.outputs.name }}
+    path: |
+      ${{ inputs.working-directory }}/plan.json
+      ${{ inputs.working-directory }}/plan-meta.json
     retention-days: 30
     overwrite: true
 ```
+
+**`plan-meta.json` is the trusted metadata.** Once `up` has verified the artifact came from a preview run of this repo's Pulumi workflow (step 3), its contents are as trustworthy as the plan itself. So all validation (commit SHA, Pulumi version, project/stack) reads from it, whichever way `plan-source` was given, including previews that posted no PR comment. The artifact name is only a lookup key; the raw `project`/`stack` live in the metadata.
 
 **`overwrite: true` is required:** one workflow run can preview the same project+stack more than once (`e2e.yml` does, three times), and `upload-artifact@v4` fails on a duplicate name within a run. The name can't be disambiguated per call, since in a reusable workflow `github.job` is always the callee's job id (`pulumi`). Instead, the marker (below) records the upload's `artifact-id` output, and `up` downloads by id. An overwritten artifact's old id is deleted, so a CAS-`up` against a superseded preview fails loudly.
 
@@ -55,10 +74,10 @@ After the step, upload `plan.json` as an artifact:
 In the "Summary and PR comment" step, when `cmd=preview`, append a machine-readable HTML comment identifying the artifact:
 
 ```html
-<!-- pulumi-plan: run_id=<GITHUB_RUN_ID> artifact_id=<steps.plan-artifact.outputs.artifact-id> sha=<GITHUB_SHA> project=<project> stack=<stack> pulumi_sha=<PULUMI_FORK_SHA> -->
+<!-- pulumi-plan: run_id=<GITHUB_RUN_ID> artifact_id=<steps.plan-artifact.outputs.artifact-id> project=<project> stack=<stack> -->
 ```
 
-Rendered comments never show this. `up` uses it to *locate* a plan (resolve `plan-source: pr:<N>` to a run and artifact). It is not trusted for validation; see step 3.
+Rendered comments never show this. `up` uses it only to *locate* a plan (resolve `plan-source: pr:<N>` to a run and artifact); `project`/`stack` are there to pick the right comment on multi-project PRs. Nothing in it is trusted for validation; see step 3.
 
 ### 3. Up consumes the plan
 
@@ -75,20 +94,27 @@ plan-source:
   required: false
   type: string
 plan-source-force:
-  description: 'Skip the SHA/pulumi-version match check on the resolved plan (dangerous)'
+  description: 'Skip the commit-SHA and Pulumi-version match checks on the resolved plan (dangerous). Provenance checks always run.'
   required: false
   default: false
   type: boolean
 ```
 
-Resolution logic (new step before `Run Pulumi`, when `cmd=up` and `plan-source` non-empty):
+Resolution logic (new step before `Run Pulumi`, when `cmd=up` and `plan-source` non-empty). All inputs reach the script via `env`, never `${{ }}` interpolation.
 
-1. Parse `plan-source`:
-   - Numeric → treat as `run_id`; find its plan artifact via `gh api repos/{owner}/{repo}/actions/runs/<run_id>/artifacts`, by name `pulumi-plan-<project>-<stack>`
-   - `pr:<N>` → `gh api repos/{owner}/{repo}/issues/<N>/comments` → keep only comments by `github-actions[bot]` that carry a `<!-- pulumi-plan: … -->` marker, filter to matching `project` + `stack`, pick the most recent, extract `run_id` + `artifact_id`. The author filter matters on public repos, where anyone can post a comment containing a forged marker.
+1. Locate `(run_id, artifact_id)`:
+   - Numeric → `run_id`; list `gh api repos/{owner}/{repo}/actions/runs/<run_id>/artifacts` and take the one named with this call's sanitized `project`/`stack` key (same `sed` as the preview side)
+   - `pr:<N>` → `gh api repos/{owner}/{repo}/issues/<N>/comments` → keep only comments by `github-actions[bot]` that carry a `<!-- pulumi-plan: … -->` marker, filter to matching `project` + `stack`, pick the most recent, extract `run_id` + `artifact_id`. The author filter matters on public repos, where anyone can post a comment containing a forged marker. Comments without a marker (from before this feature) are skipped.
    - `comment:<id>` → fetch that comment (same author check), extract marker
-2. Validate against GitHub's records, not the marker: `gh api repos/{owner}/{repo}/actions/runs/<run_id>` → require `head_sha == github.sha` and that the run is this repo's Pulumi workflow (unless `plan-source-force`). Compare the marker's `pulumi_sha` to `PULUMI_FORK_SHA` (also skippable via `plan-source-force`). The `github.sha` comparison is meaningful because callers dispatch `pulumi.yml` via `workflow_dispatch` (e.g. ops), so preview and `up` both run on the branch head. A `pull_request`-triggered preview would run on the merge commit and never match.
-3. Download by id: `gh api repos/{owner}/{repo}/actions/artifacts/<artifact_id>/zip > plan.zip && unzip plan.zip -d "${{ inputs.working-directory }}"` → gets `plan.json`. Needs `actions: read`, which the workflow already requests.
+2. Verify provenance. These checks always run; `plan-source-force` does not skip them:
+   - `gh api repos/{owner}/{repo}/actions/runs/<run_id>`: the run belongs to this repository, and ran the same caller workflow file as the current run (its `path` matches the current run's)
+   - `gh api repos/{owner}/{repo}/actions/artifacts/<artifact_id>`: `workflow_run.id == run_id`, `name` equals the expected sanitized name, and `expired == false`. This ties the artifact to the verified run, so a marker can't pair a trusted run with some other run's artifact.
+3. Download by id: `gh api repos/{owner}/{repo}/actions/artifacts/<artifact_id>/zip > plan.zip && unzip plan.zip -d "$WORKING_DIRECTORY"` → gets `plan.json` + `plan-meta.json`. Needs `actions: read`, which the workflow already requests.
+4. Validate against `plan-meta.json`:
+   - Always: `project` and `stack` equal this call's inputs (exact, unsanitized)
+   - Unless `plan-source-force`: `sha == github.sha` and `pulumi_sha == PULUMI_FORK_SHA`
+
+   The `github.sha` comparison is meaningful because callers dispatch `pulumi.yml` via `workflow_dispatch` (e.g. ops), so preview and `up` both run on the branch head. A `pull_request`-triggered preview would run on the merge commit and never match.
 
 In the `up` branch:
 
@@ -108,10 +134,10 @@ If the engine's re-computed plan diverges from `plan.json`, it exits non-zero na
 
 ## Open questions
 
-1. **Plan-file version stability across Pulumi engine versions.** Should the marker include the Pulumi version and refuse `up` on a different one? Leaning: yes — record `pulumi_sha` (the `PULUMI_FORK_SHA` env we already have) in the marker, refuse mismatches unless `plan-source-force`. Provider versions (`pulumi-aws` etc.) also matter but are harder to pin from the workflow; the checkout SHA covers them if `pyproject.toml` pins are exact.
+1. **Plan-file version stability across Pulumi engine versions.** Resolved: `plan-meta.json` records `pulumi_sha` (the `PULUMI_FORK_SHA` env we already have), and `up` refuses mismatches unless `plan-source-force`. Provider versions (`pulumi-aws` etc.) also matter but are harder to pin from the workflow; the checkout SHA covers them if `pyproject.toml` pins are exact.
 2. **Provider determinism.** Do our providers emit fully deterministic plans given identical state? `aws.iam.*` (our current use case): almost certainly yes. `aws.s3.*` / `gcp.storage.*` with server-side defaults filled in on refresh: possibly not — worth a smoke test before we recommend CAS-up for those stacks. Not a blocker for shipping the feature.
-3. **Multi-project PRs.** A single PR could touch multiple projects (`oa-ci` and `oa-management`) → two plan artifacts, two markers in two separate comments (already how existing preview comments work). `pr:<N>` resolution has to filter on (project, stack) — the marker includes both. Confirmed unambiguous.
-4. **Artifact retention.** GitHub artifacts default to 90 days; I set `retention-days: 30` above since a plan stale by a month is almost certainly wrong to apply. Tunable, but 30d is a safer default. Expired artifact → `gh run download` fails, `up` fails — feature not bug.
+3. **Multi-project PRs.** A single PR could touch multiple projects (`oa-ci` and `oa-management`) → two plan artifacts, two markers in two separate comments (already how existing preview comments work). `pr:<N>` resolution has to filter on (project, stack) — the marker includes both, and `plan-meta.json` re-checks them. Confirmed unambiguous.
+4. **Artifact retention.** GitHub artifacts default to 90 days; I set `retention-days: 30` above since a plan stale by a month is almost certainly wrong to apply. Tunable, but 30d is a safer default. Expired artifact → the provenance check (`expired == false`) fails, `up` fails — feature not bug.
 5. **`refresh` before `up`.** If someone runs `refresh` between the `preview` and the CAS-`up`, refresh changes stack state → plan mismatches → CAS fails. That's correct behavior (state changed underneath us), but worth documenting.
 6. **First-preview-on-a-PR before `plan-source` was wired.** `pr:<N>` resolution should tolerate old preview comments without a marker (just skip them, keep looking).
 
